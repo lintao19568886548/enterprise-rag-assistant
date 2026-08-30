@@ -1,0 +1,8 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="全部服务 (19530 + 8000 + 8001)" type="CompoundRunConfigurationType">
+    <toRun name="本地向量库 (19530)" type="PythonConfigurationType" />
+    <toRun name="导入服务 (8000)" type="PythonConfigurationType" />
+    <toRun name="问答服务 (8001)" type="PythonConfigurationType" />
+    <method v="2" />
+  </configuration>
+</component>

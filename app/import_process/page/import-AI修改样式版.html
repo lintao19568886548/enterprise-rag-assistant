@@ -1,0 +1,574 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>文件导入服务</title>
+    <style>
+        /* ========== 赛博朋克风格主题 ========== */
+        :root {
+            --neon-blue: #00f3ff;
+            --neon-pink: #ff00ff;
+            --neon-purple: #bc13fe;
+            --neon-yellow: #f9f002;
+            --dark-bg: #0a0a12;
+            --panel-bg: #12121f;
+            --grid-color: rgba(0, 243, 255, 0.1);
+        }
+
+        body {
+            font-family: 'Courier New', monospace;
+            background-color: var(--dark-bg);
+            background-image:
+                linear-gradient(var(--grid-color) 1px, transparent 1px),
+                linear-gradient(90deg, var(--grid-color) 1px, transparent 1px);
+            background-size: 30px 30px;
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            justify-content: center;
+            animation: grid-move 20s linear infinite;
+        }
+
+        @keyframes grid-move {
+            0% { transform: translateY(0); }
+            100% { transform: translateY(30px); }
+        }
+
+        .container {
+            width: 100%;
+            max-width: 800px;
+            background-color: var(--panel-bg);
+            padding: 30px;
+            border-radius: 0;
+            border: 2px solid var(--neon-blue);
+            box-shadow:
+                0 0 20px rgba(0, 243, 255, 0.3),
+                inset 0 0 20px rgba(0, 243, 255, 0.1);
+            position: relative;
+        }
+
+        .container::before {
+            content: '';
+            position: absolute;
+            top: -2px;
+            left: -2px;
+            right: -2px;
+            bottom: -2px;
+            background: linear-gradient(45deg, var(--neon-blue), var(--neon-pink), var(--neon-purple));
+            z-index: -1;
+            border-radius: 0;
+            filter: blur(10px);
+            opacity: 0.5;
+        }
+
+        h1 {
+            color: var(--neon-blue);
+            text-align: center;
+            margin-bottom: 30px;
+            text-shadow: 0 0 10px var(--neon-blue);
+            letter-spacing: 3px;
+            font-weight: normal;
+        }
+
+        .upload-area {
+            border: 2px dashed var(--neon-blue);
+            border-radius: 0;
+            padding: 40px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.3s;
+            margin-bottom: 20px;
+            background: rgba(0, 243, 255, 0.05);
+            position: relative;
+            overflow: hidden;
+        }
+
+        .upload-area::after {
+            content: '';
+            position: absolute;
+            top: -50%;
+            left: -50%;
+            width: 200%;
+            height: 200%;
+            background: linear-gradient(
+                45deg,
+                transparent 30%,
+                rgba(0, 243, 255, 0.1) 50%,
+                transparent 70%
+            );
+            animation: scan 3s linear infinite;
+        }
+
+        @keyframes scan {
+            0% { transform: translateX(-100%) rotate(45deg); }
+            100% { transform: translateX(100%) rotate(45deg); }
+        }
+
+        .upload-area:hover {
+            background-color: rgba(0, 243, 255, 0.15);
+            box-shadow: 0 0 30px rgba(0, 243, 255, 0.5);
+            border-color: var(--neon-pink);
+        }
+
+        .upload-icon {
+            font-size: 48px;
+            color: var(--neon-blue);
+            margin-bottom: 10px;
+            text-shadow: 0 0 20px var(--neon-blue);
+            animation: glow 2s ease-in-out infinite;
+        }
+
+        @keyframes glow {
+            0%, 100% { text-shadow: 0 0 20px var(--neon-blue); }
+            50% { text-shadow: 0 0 40px var(--neon-blue), 0 0 60px var(--neon-blue); }
+        }
+
+        .file-input {
+            display: none;
+        }
+
+        .btn {
+            background: linear-gradient(45deg, var(--neon-blue), var(--neon-purple));
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 0;
+            cursor: pointer;
+            font-size: 16px;
+            transition: all 0.3s;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            clip-path: polygon(10px 0, 100% 0, 100% calc(100% - 10px), calc(100% - 10px) 100%, 0 100%, 0 10px);
+        }
+
+        .btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 0 30px rgba(0, 243, 255, 0.6);
+        }
+
+        .btn:disabled {
+            background: linear-gradient(45deg, #333, #555);
+            cursor: not-allowed;
+            box-shadow: none;
+        }
+
+        .file-list {
+            margin-top: 30px;
+        }
+
+        .file-item {
+            background-color: rgba(18, 18, 31, 0.8);
+            border: 1px solid var(--neon-blue);
+            border-radius: 0;
+            padding: 15px;
+            margin-bottom: 10px;
+            display: grid;
+            grid-template-columns: 1fr auto;
+            grid-template-rows: auto auto auto;
+            gap: 10px;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .file-item::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 3px;
+            height: 100%;
+            background: linear-gradient(to bottom, var(--neon-blue), var(--neon-pink));
+        }
+
+        .file-info {
+            display: flex;
+            flex-direction: column;
+            flex: 1;
+            margin-right: 0;
+            grid-column: 1 / 2;
+            grid-row: 1 / 2;
+        }
+
+        .file-name {
+            font-weight: normal;
+            color: var(--neon-yellow);
+            text-shadow: 0 0 5px rgba(249, 240, 2, 0.5);
+            letter-spacing: 1px;
+        }
+
+        .file-size {
+            font-size: 12px;
+            color: var(--neon-blue);
+            margin-top: 4px;
+            opacity: 0.7;
+        }
+
+        .progress-wrapper {
+            grid-column: 1 / 3;
+            grid-row: 2 / 3;
+            display: flex;
+            align-items: center;
+            gap: 15px;
+        }
+
+        .progress-bar-container {
+            flex: 1;
+            height: 8px;
+            background-color: rgba(0, 243, 255, 0.1);
+            border-radius: 0;
+            overflow: hidden;
+            display: none;
+            border: 1px solid rgba(0, 243, 255, 0.3);
+        }
+
+        .progress-bar {
+            height: 100%;
+            background: linear-gradient(90deg, var(--neon-blue), var(--neon-pink), var(--neon-purple));
+            width: 0%;
+            transition: width 0.3s, box-shadow 0.3s;
+            box-shadow: 0 0 10px var(--neon-blue);
+            position: relative;
+        }
+
+        .progress-bar::after {
+            content: '';
+            position: absolute;
+            top: 0;
+            right: 0;
+            width: 2px;
+            height: 100%;
+            background: white;
+            box-shadow: 0 0 10px white;
+            animation: pulse 1s ease-in-out infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 0.5; }
+            50% { opacity: 1; }
+        }
+
+        .status-badge {
+            padding: 12px 30px;
+            font-size: 14px;
+            font-weight: bold;
+            color: white;
+            min-width: 150px;
+            text-align: center;
+            text-transform: uppercase;
+            letter-spacing: 3px;
+            clip-path: polygon(10px 0, 100% 0, 100% calc(100% - 10px), calc(100% - 10px) 100%, 0 100%, 0 10px);
+            grid-column: 1 / 3;
+            grid-row: 3 / 4;
+            justify-self: center;
+            margin-top: 10px;
+            animation: status-glow 2s ease-in-out infinite;
+        }
+
+        @keyframes status-glow {
+            0%, 100% {
+                filter: drop-shadow(0 0 5px currentColor);
+                transform: scale(1);
+            }
+            50% {
+                filter: drop-shadow(0 0 20px currentColor);
+                transform: scale(1.05);
+            }
+        }
+
+        .status-uploading {
+            background: linear-gradient(45deg, #f39c12, #e74c3c);
+            box-shadow: 0 0 20px rgba(243, 156, 18, 0.6);
+        }
+        .status-processing {
+            background: linear-gradient(45deg, var(--neon-blue), var(--neon-purple));
+            box-shadow: 0 0 20px rgba(0, 243, 255, 0.6);
+            animation: status-glow 1.5s ease-in-out infinite;
+        }
+        .status-completed {
+            background: linear-gradient(45deg, #2ecc71, #27ae60);
+            box-shadow: 0 0 30px rgba(46, 204, 113, 0.8);
+            font-size: 16px;
+            letter-spacing: 5px;
+            min-width: 200px;
+            padding: 15px 40px;
+        }
+        .status-error {
+            background: linear-gradient(45deg, #e74c3c, #c0392b);
+            box-shadow: 0 0 30px rgba(231, 76, 60, 0.8);
+            animation: blink 0.8s ease-in-out infinite;
+        }
+
+        @keyframes blink {
+            0%, 100% {
+                opacity: 1;
+                filter: drop-shadow(0 0 10px rgba(231, 76, 60, 0.5));
+            }
+            50% {
+                opacity: 0.6;
+                filter: drop-shadow(0 0 30px rgba(231, 76, 60, 1));
+            }
+        }
+
+        .log-details {
+            margin-top: 8px;
+            font-size: 12px;
+            color: var(--neon-blue);
+            border-left: 2px solid var(--neon-blue);
+            padding-left: 10px;
+            grid-column: 1 / 3;
+            grid-row: 4 / 5;
+        }
+
+        .log-details summary {
+            cursor: pointer;
+            user-select: none;
+            color: var(--neon-pink);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            font-size: 11px;
+        }
+
+        .log-details summary:hover {
+            color: var(--neon-blue);
+            text-shadow: 0 0 5px var(--neon-blue);
+        }
+
+        .log-list {
+            margin: 6px 0 0 16px;
+            padding: 0;
+        }
+
+        .log-list li {
+            margin: 2px 0;
+            line-height: 1.4;
+            color: var(--neon-yellow);
+            list-style-type: square;
+        }
+
+        .log-list li::marker {
+            color: var(--neon-pink);
+        }
+
+        ::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: var(--dark-bg);
+            border: 1px solid var(--grid-color);
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: linear-gradient(45deg, var(--neon-blue), var(--neon-purple));
+            border-radius: 0;
+        }
+
+        ::-webkit-scrollbar-thumb:hover {
+            background: linear-gradient(45deg, var(--neon-pink), var(--neon-purple));
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h1>⚡ CYBERPUNK FILE IMPORT ⚡</h1>
+
+    <div class="upload-area" id="dropZone" onclick="document.getElementById('fileInput').click()">
+        <div class="upload-icon">📡</div>
+        <p style="color: var(--neon-blue); text-shadow: 0 0 5px var(--neon-blue);">
+            [ CLICK OR DRAG FILES HERE ]<br>
+            <span style="font-size: 12px; opacity: 0.7;">SUPPORTED: PDF / MD FORMAT</span>
+        </p>
+        <input type="file" id="fileInput" class="file-input" multiple accept=".pdf,.md">
+    </div>
+
+    <div id="fileList" class="file-list">
+        <!-- 文件列表将在这里生成 -->
+    </div>
+</div>
+
+<script>
+    const dropZone = document.getElementById('dropZone');
+    const fileInput = document.getElementById('fileInput');
+    const fileList = document.getElementById('fileList');
+
+    // 模拟后端 API 地址
+    const API_BASE = 'http://127.0.0.1:8000';
+
+    dropZone.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        dropZone.style.backgroundColor = 'rgba(0, 243, 255, 0.15)';
+    });
+
+    dropZone.addEventListener('dragleave', (e) => {
+        e.preventDefault();
+        dropZone.style.backgroundColor = '';
+    });
+
+    dropZone.addEventListener('drop', (e) => {
+        e.preventDefault();
+        dropZone.style.backgroundColor = '';
+        handleFiles(e.dataTransfer.files);
+    });
+
+    fileInput.addEventListener('change', (e) => {
+        handleFiles(e.target.files);
+    });
+
+    function handleFiles(files) {
+        Array.from(files).forEach(uploadFile);
+    }
+
+    function updateProgressBar(bar, percentage) {
+        bar.style.width = percentage + '%';
+        if (percentage >= 100) {
+            bar.style.boxShadow = '0 0 20px var(--neon-blue)';
+        } else {
+            bar.style.boxShadow = '0 0 10px var(--neon-blue)';
+        }
+    }
+
+    async function uploadFile(file) {
+        // 创建文件项 UI
+        const id = 'file-' + Math.random().toString(36).substr(2, 9);
+        const html = `
+            <div class="file-item" id="${id}">
+                <div class="file-info">
+                    <span class="file-name">${file.name}</span>
+                    <span class="file-size">SIZE: ${(file.size / 1024).toFixed(2)} KB</span>
+                </div>
+                <div class="status-badge status-uploading">UPLOADING...</div>
+                <div class="progress-wrapper">
+                    <div class="progress-bar-container">
+                        <div class="progress-bar"></div>
+                    </div>
+                </div>
+                <details class="log-details">
+                    <summary>>> SYSTEM LOG</summary>
+                    <ul class="log-list"></ul>
+                </details>
+            </div>
+        `;
+        fileList.insertAdjacentHTML('afterbegin', html);
+        const itemEl = document.getElementById(id);
+        const statusBadge = itemEl.querySelector('.status-badge');
+        const progressBar = itemEl.querySelector('.progress-bar');
+        const progressContainer = itemEl.querySelector('.progress-bar-container');
+        const logDetails = itemEl.querySelector('.log-details');
+        const logSummary = itemEl.querySelector('.log-details summary');
+        const logListEl = itemEl.querySelector('.log-list');
+
+        // 构建 FormData
+        const formData = new FormData();
+        formData.append('files', file);
+
+        try {
+            // 1. 上传文件
+            progressContainer.style.display = 'block';
+            // 模拟上传进度
+            updateProgressBar(progressBar, 50);
+
+            const response = await fetch(`${API_BASE}/upload`, {
+                method: 'POST',
+                body: formData
+            });
+
+            if (!response.ok) throw new Error('Upload failed');
+
+            const result = await response.json();
+            const taskId = result.task_ids[0];
+
+            // 上传完成，进入处理中，进度固定为 30%
+            updateProgressBar(progressBar, 30);
+            statusBadge.textContent = 'PROCESSING...';
+            statusBadge.className = 'status-badge status-processing';
+
+            // 2. 轮询状态
+            pollStatus(taskId, itemEl);
+
+        } catch (error) {
+            console.error(error);
+            statusBadge.textContent = 'FAILED';
+            statusBadge.className = 'status-badge status-error';
+        }
+    }
+
+    function normalizeDoneLog(text) {
+        if (typeof text !== 'string') return String(text);
+        return text.endsWith('已完成') ? text : `${text}已完成`;
+    }
+
+    function normalizeRunningLog(text) {
+        if (typeof text !== 'string') return String(text);
+        if (text.startsWith('正在进行')) return text.endsWith('...') ? text : `${text}...`;
+        return `正在进行${text}...`;
+    }
+
+    function renderLogs(itemEl, doneList, runningList) {
+        const logSummary = itemEl.querySelector('.log-details summary');
+        const logListEl = itemEl.querySelector('.log-list');
+        const logDetails = itemEl.querySelector('.log-details');
+
+        const done = Array.isArray(doneList) ? doneList : [];
+        const running = Array.isArray(runningList) ? runningList : [];
+
+        logSummary.textContent = `>> SYSTEM LOG [DONE:${done.length} RUNNING:${running.length}]`;
+
+        logListEl.innerHTML = '';
+        const lines = [
+            ...done.map(normalizeDoneLog),
+            ...running.map(normalizeRunningLog),
+        ];
+
+        if (lines.length === 0) {
+            const li = document.createElement('li');
+            li.textContent = '> NO DATA';
+            logListEl.appendChild(li);
+        } else {
+            for (const line of lines) {
+                const li = document.createElement('li');
+                li.textContent = '> ' + line;
+                logListEl.appendChild(li);
+            }
+        }
+
+        if (lines.length === 0) {
+            logDetails.open = false;
+        }
+    }
+
+    function pollStatus(taskId, itemEl) {
+        const statusBadge = itemEl.querySelector('.status-badge');
+        const progressBar = itemEl.querySelector('.progress-bar');
+
+        const interval = setInterval(async () => {
+            try {
+                const res = await fetch(`${API_BASE}/status/${taskId}`);
+                const data = await res.json();
+
+                renderLogs(itemEl, data.done_list, data.running_list);
+
+                if (data.status === 'completed') {
+                    statusBadge.textContent = '✅ MISSION COMPLETE ✅';
+                    statusBadge.className = 'status-badge status-completed';
+                    updateProgressBar(progressBar, 100);
+                    clearInterval(interval);
+                } else if (data.status === 'processing') {
+                    statusBadge.textContent = 'PROCESSING...';
+                    updateProgressBar(progressBar, 30);
+                } else if (data.status === 'failed') {
+                    statusBadge.textContent = '❌ MISSION FAILED ❌';
+                    statusBadge.className = 'status-badge status-error';
+                    clearInterval(interval);
+                }
+            } catch (e) {
+                console.error('Polling error', e);
+            }
+        }, 2000);
+    }
+</script>
+
+</body>
+</html>

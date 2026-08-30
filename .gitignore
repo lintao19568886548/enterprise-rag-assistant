@@ -1,0 +1,63 @@
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Runtime data and logs
+logs/
+output/
+data/
+tmp/
+temp/
+*.log
+*.pid
+*.sqlite
+*.sqlite3
+*.db
+
+# Models and third-party caches
+models/
+model_cache/
+.cache/
+huggingface/
+modelscope/
+
+# Local infrastructure volumes
+volumes/
+redis_data/
+postgres_data/
+minio_data/
+milvus_data/
+etcd_data/
+
+# IDE: keep only shared PyCharm run configurations
+.idea/*
+!.idea/runConfigurations/
+.idea/runConfigurations/*
+!.idea/runConfigurations/*.xml
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.swp
+*.swo
+
+# Local test artifacts
+test/import/fastapi/uploads/
+test/import/fastapi/log.txt
