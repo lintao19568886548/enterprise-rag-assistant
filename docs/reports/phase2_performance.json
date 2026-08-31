@@ -1,0 +1,43 @@
+{
+  "executed_at": "2026-08-31T16:03:02.377065+00:00",
+  "mode": "in_process_api_and_database_with_mocked_external_model_and_parser",
+  "uses_business_data": false,
+  "query_concurrency": 20,
+  "query": {
+    "requests": 20,
+    "successes": 20,
+    "success_rate": 1.0,
+    "p50_ms": 615.25,
+    "p95_ms": 801.24,
+    "p99_ms": 808.39,
+    "error_code_distribution": {}
+  },
+  "upload_concurrency": 5,
+  "upload": {
+    "requests": 5,
+    "successes": 5,
+    "success_rate": 1.0,
+    "p50_ms": 644.65,
+    "p95_ms": 655.13,
+    "p99_ms": 655.13,
+    "error_code_distribution": {}
+  },
+  "large_file_boundary": {
+    "configured_mb": 1,
+    "status": 413,
+    "error_code": "FILE_TOO_LARGE",
+    "passed": true
+  },
+  "process_cpu_seconds": 1.9375,
+  "wall_seconds": 2.1331,
+  "python_peak_memory_mib": 8.14,
+  "queue_backlog": null,
+  "model_timeout_rate": null,
+  "external_services_exercised": false,
+  "limitations": [
+    "Model and parser calls are deterministic stubs; this measures API, validation and SQLite metadata paths.",
+    "Docker, PostgreSQL server, Redis server and staging MinIO are unavailable on this host.",
+    "Real provider concurrency, queue backlog and infrastructure interruption require staging acceptance."
+  ],
+  "passed": true
+}

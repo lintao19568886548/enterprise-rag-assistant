@@ -29,6 +29,12 @@ NO_EVIDENCE_SIGNALS = (
     "无法从参考资料",
     "未提供相关信息",
 )
+SENSITIVE_OUTPUT_PATTERN = re.compile(
+    r"(?i)(system\s+prompt|developer\s+message|系统提示词|开发者指令|"
+    r"<\s*(?:tool|function)_call|\"tool_calls\"\s*:|OPENAI_API_KEY\s*=|"
+    r"authorization\s*:\s*bearer\s+\S+)"
+)
+SECURITY_REFUSAL_ANSWER = "抱歉，安全策略阻止了可能泄露内部指令、凭据或伪造工具调用的回答。"
 
 
 class NodeAnswerOutput(NodeBase):
@@ -52,6 +58,7 @@ class NodeAnswerOutput(NodeBase):
                 prompt = self._construct_prompt(state)
                 state["prompt"] = prompt
                 self._generate_response(state, prompt)
+                self._enforce_generated_output_security(state)
                 self._reconcile_generated_evidence(state)
 
         image_urls = (
@@ -205,6 +212,17 @@ class NodeAnswerOutput(NodeBase):
         if not state.get("answer"):
             raise RuntimeError("model returned an empty answer")
         logger.info("模型生成完成，长度={}，耗时={}ms", len(state["answer"]), state["latency_ms"])
+
+    @staticmethod
+    def _enforce_generated_output_security(state: QueryGraphState) -> None:
+        answer = str(state.get("answer") or "")
+        if not SENSITIVE_OUTPUT_PATTERN.search(answer):
+            return
+        state["answer"] = SECURITY_REFUSAL_ANSWER
+        state["has_sufficient_evidence"] = False
+        state["confidence"] = 0.0
+        state["citations"] = []
+        logger.warning("模型输出触发敏感内容防泄漏策略")
 
     @staticmethod
     def _reconcile_generated_evidence(state: QueryGraphState) -> None:
