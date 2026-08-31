@@ -9,6 +9,7 @@
 ```text
 Browser
   ├─ http://127.0.0.1:8000/import.html
+  ├─ http://127.0.0.1:8000/admin.html
   └─ http://127.0.0.1:8001/chat.html
           │
      FastAPI services
@@ -131,9 +132,13 @@ REDIS_ENABLED=True
 服务页面：
 
 - 文件导入：http://127.0.0.1:8000/import.html
+- 企业管理工作台：http://127.0.0.1:8000/admin.html
 - 问答：http://127.0.0.1:8001/chat.html
 - 导入 Swagger：http://127.0.0.1:8000/docs
 - 问答 Swagger：http://127.0.0.1:8001/docs
+
+二期本机真实验收、质量门禁、已知外部阻塞和回退入口见
+[`docs/PHASE2_ACCEPTANCE.md`](docs/PHASE2_ACCEPTANCE.md)。
 
 ## PyCharm 启动
 

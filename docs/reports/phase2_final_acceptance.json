@@ -1,0 +1,116 @@
+{
+  "recorded_at": "2026-09-01T00:43:04+08:00",
+  "branch": "phase2/enterprise-production",
+  "release_status": "implementation_and_pr_gate_complete_release_blocked",
+  "runtime": {
+    "started_from": "PyCharm 全部服务 (19530 + 8000 + 8001)",
+    "ports": {
+      "19530": "listening",
+      "8000": "listening",
+      "8001": "listening"
+    },
+    "ready": {
+      "http://127.0.0.1:8000/health/ready": "ready",
+      "http://127.0.0.1:8001/health/ready": "ready"
+    }
+  },
+  "browser_acceptance": {
+    "pages": [
+      "http://127.0.0.1:8000/import.html",
+      "http://127.0.0.1:8000/admin.html",
+      "http://127.0.0.1:8001/chat.html"
+    ],
+    "desktop_horizontal_overflow": false,
+    "mobile_viewport": "390x844",
+    "mobile_page_horizontal_overflow": false,
+    "console_warnings_or_errors": 0
+  },
+  "real_e2e_query": {
+    "question": "H3C LA2608 室内无线网关如何验证与无线控制器已经连通？请给出命令、判断标准，并引用资料。",
+    "session_id": "sess-hzxqdoacmvomtf5dxsv",
+    "message_id": "3bf3fb29-9f50-41a4-9ce4-7f4e6b67dc4f",
+    "tenant_id": "00000000-0000-0000-0000-000000000100",
+    "user_id": "00000000-0000-0000-0000-000000000001",
+    "knowledge_base_id": "00000000-0000-0000-0000-000000000010",
+    "model": "qwen-flash",
+    "latency_ms": 1904,
+    "completed_graph_stages": 7,
+    "evidence_confidence": 0.89,
+    "citations": 5,
+    "images": 4,
+    "history_persisted": true
+  },
+  "database": {
+    "dialect": "sqlite",
+    "alembic_revision": "d4e5f6a7b8c9 (head)",
+    "integrity_check": "ok",
+    "foreign_key_errors": 0,
+    "counts": {
+      "tenants": 1,
+      "users": 1,
+      "memberships": 1,
+      "knowledge_bases": 2,
+      "documents": 3,
+      "document_versions": 3,
+      "import_tasks": 4,
+      "chat_sessions": 21,
+      "chat_messages": 72
+    }
+  },
+  "milvus": {
+    "aliases": {
+      "kb_chunks_active": "kb_chunks_phase2_v2",
+      "kb_item_names_active": "kb_item_names_phase2_v2"
+    },
+    "collection_counts": {
+      "kb_chunks": 49,
+      "kb_chunks_phase2_v2": 49,
+      "kb_item_names": 3,
+      "kb_item_names_phase2_v2": 3
+    },
+    "legacy_sources_preserved": true,
+    "cross_tenant_probe": {
+      "rounds": 100,
+      "inserted_vectors": 200,
+      "leaks": 0,
+      "p50_ms": 4.617,
+      "p95_ms": 7.573,
+      "p99_ms": 10.321,
+      "temporary_collection_removed": true
+    }
+  },
+  "quality": {
+    "pytest": {
+      "passed": 91,
+      "skipped": 2,
+      "skip_reason": "real PostgreSQL owner/runtime test URLs are not configured"
+    },
+    "ruff": "passed",
+    "mypy": {
+      "status": "passed",
+      "source_files": 98
+    },
+    "compileall": "passed",
+    "evaluation_schema": {
+      "total": 100,
+      "approved": 30,
+      "needs_human_label": 70,
+      "errors": 0
+    },
+    "offline_pr_gate": {
+      "mode": "synthetic_scorer_contract",
+      "passed": true,
+      "cases_passed": 30,
+      "cases_total": 30
+    },
+    "release_gate": {
+      "passed": false,
+      "blocked_by": [
+        "70 business cases still need human labels and approval",
+        "approved prompt-injection and permission-isolation release cases are unavailable",
+        "real PostgreSQL/Redis/MinIO/OIDC staging parameters are unavailable"
+      ]
+    }
+  },
+  "backup": "D:\\XiangMu\\企业只能问答系统\\3.代码\\knowledge_base_0410\\backups\\pre_phase2_20260831_215908"
+}
