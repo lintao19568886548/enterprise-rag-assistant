@@ -23,7 +23,7 @@ from app.db.models import Base
 
 
 def normalized_database_url() -> str:
-    url = settings.database_url
+    url = settings.database_dsn
     prefix = "sqlite:///./"
     if url.startswith(prefix):
         relative = url[len(prefix) :]

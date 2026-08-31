@@ -2,7 +2,7 @@ import json
 
 from fastapi.testclient import TestClient
 
-from app.core.logger import redact_log_text
+from app.core.logger import redact_log_text, redact_log_value
 from app.import_process.api.file_import_service import app as import_app
 from scripts.recovery_drill_sqlite import run_drill
 
@@ -21,6 +21,24 @@ def test_sensitive_credentials_are_redacted():
     assert jwt not in redacted
     assert "database-password" not in redacted
     assert redacted.count("***REDACTED***") >= 5
+
+
+def test_nested_structured_credentials_are_redacted():
+    bearer = "nested-" + "secret-token-123456"
+    database_password = "nested-" + "database-password"
+    api_secret = "nested-" + "api-secret-123456"
+    structured = {
+        "headers": {"Authorization": f"Bearer {bearer}"},
+        "database_url": f"postgresql://user:{database_password}@postgres/db",
+        "items": [{"message": f"API_KEY={api_secret}"}],
+        "safe": "visible",
+    }
+    redacted = redact_log_value(structured)
+    rendered = json.dumps(redacted)
+    assert bearer not in rendered
+    assert database_password not in rendered
+    assert api_secret not in rendered
+    assert redacted["safe"] == "visible"
 
 
 def test_metrics_expose_enterprise_observability_contract():

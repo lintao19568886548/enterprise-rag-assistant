@@ -89,3 +89,18 @@ def test_redis_backend_requires_redis_to_be_enabled():
 def test_secret_is_redacted_from_repr():
     config = Settings(_env_file=None, openai_api_key="sk-test-secret-value")
     assert "sk-test-secret-value" not in repr(config)
+
+
+def test_connection_credentials_are_redacted_from_repr():
+    config = Settings(
+        _env_file=None,
+        database_url="postgresql+psycopg://app:database-password@db/app",
+        redis_url="redis://:redis-password@redis:6379/0",
+        langgraph_database_url="postgresql://app:checkpoint-password@db/app",
+    )
+    rendered = repr(config)
+    assert "database-password" not in rendered
+    assert "redis-password" not in rendered
+    assert "checkpoint-password" not in rendered
+    assert config.database_dsn.endswith("@db/app")
+    assert config.redis_dsn.endswith("@redis:6379/0")

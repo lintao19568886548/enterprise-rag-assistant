@@ -119,19 +119,21 @@ class Settings(BaseSettings):
     answer_context_max_chars: int = Field(default=12000, ge=1000, le=200000)
 
     redis_enabled: bool = False
-    redis_url: str = "redis://127.0.0.1:6379/0"
+    redis_url: SecretStr = SecretStr("redis://127.0.0.1:6379/0")
     task_backend: Literal["memory", "redis"] = "memory"
     task_ttl_seconds: int = Field(default=86400, ge=60)
     task_queue_enabled: bool = False
-    celery_broker_url: str | None = None
-    celery_result_backend: str | None = None
+    celery_broker_url: SecretStr | None = None
+    celery_result_backend: SecretStr | None = None
     celery_task_max_retries: int = Field(default=3, ge=0, le=20)
     cleanup_max_retries: int = Field(default=5, ge=1, le=50)
     cleanup_retry_base_seconds: int = Field(default=5, ge=1, le=3600)
     cleanup_retry_max_seconds: int = Field(default=600, ge=1, le=86400)
 
     database_enabled: bool = True
-    database_url: str = f"sqlite:///{(PROJECT_ROOT / 'data' / 'knowledge_base.db').as_posix()}"
+    database_url: SecretStr = SecretStr(
+        f"sqlite:///{(PROJECT_ROOT / 'data' / 'knowledge_base.db').as_posix()}"
+    )
     database_pool_size: int = Field(default=10, ge=1, le=100)
     database_max_overflow: int = Field(default=20, ge=0, le=200)
     database_pool_timeout_seconds: int = Field(default=30, ge=1, le=300)
@@ -139,7 +141,7 @@ class Settings(BaseSettings):
 
     langgraph_checkpointer: Literal["memory", "sqlite", "postgres"] = "sqlite"
     langgraph_checkpoint_path: str = str(PROJECT_ROOT / "data" / "langgraph_checkpoints.sqlite")
-    langgraph_database_url: str | None = None
+    langgraph_database_url: SecretStr | None = None
     langgraph_aes_key: SecretStr | None = None
 
     milvus_uri: str = Field(
@@ -217,12 +219,24 @@ class Settings(BaseSettings):
         return self.upload_max_file_size_mb * 1024 * 1024
 
     @property
+    def redis_dsn(self) -> str:
+        return self.reveal(self.redis_url) or ""
+
+    @property
+    def database_dsn(self) -> str:
+        return self.reveal(self.database_url) or ""
+
+    @property
+    def langgraph_database_dsn(self) -> str | None:
+        return self.reveal(self.langgraph_database_url)
+
+    @property
     def effective_celery_broker_url(self) -> str:
-        return self.celery_broker_url or self.redis_url
+        return self.reveal(self.celery_broker_url) or self.redis_dsn
 
     @property
     def effective_celery_result_backend(self) -> str:
-        return self.celery_result_backend or self.redis_url
+        return self.reveal(self.celery_result_backend) or self.redis_dsn
 
     @property
     def allowed_models(self) -> set[str]:
@@ -319,11 +333,11 @@ class Settings(BaseSettings):
                 raise ValueError("TASK_QUEUE_ENABLED must be true in production")
             if not self.database_enabled:
                 raise ValueError("DATABASE_ENABLED must be true in production")
-            if self.database_url.lower().startswith("sqlite"):
+            if self.database_dsn.lower().startswith("sqlite"):
                 raise ValueError("SQLite is forbidden in production; use PostgreSQL")
             if self.langgraph_checkpointer != "postgres":
                 raise ValueError("LANGGRAPH_CHECKPOINTER=postgres is required in production")
-            if not self.langgraph_database_url:
+            if not self.langgraph_database_dsn:
                 raise ValueError("LANGGRAPH_DATABASE_URL is required in production")
             if not self.langgraph_aes_key:
                 raise ValueError("LANGGRAPH_AES_KEY is required to encrypt production checkpoints")

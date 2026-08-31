@@ -23,6 +23,7 @@ deploy/nginx/certs/*.key
 .env.staging
 
 # Runtime data and logs
+backups/
 logs/
 output/
 data/

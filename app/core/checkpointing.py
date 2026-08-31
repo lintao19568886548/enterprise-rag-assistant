@@ -58,7 +58,7 @@ def get_checkpoint_saver(namespace: str) -> BaseCheckpointSaver:
         from psycopg import Connection
         from psycopg.rows import dict_row
 
-        database_url = settings.langgraph_database_url or settings.database_url
+        database_url = settings.langgraph_database_dsn or settings.database_dsn
         database_url = database_url.replace("postgresql+psycopg://", "postgresql://", 1)
         postgres_connection = Connection.connect(
             database_url,
