@@ -135,6 +135,54 @@ def test_cross_tenant_select_update_delete_and_insert_are_blocked(rls_records):
     engine.dispose()
 
 
+def test_runtime_role_is_least_privileged():
+    engine = create_engine(RUNTIME_URL)
+    with engine.connect() as connection:
+        attributes = connection.execute(
+            text(
+                "SELECT rolsuper, rolcreatedb, rolcreaterole, rolinherit, rolbypassrls "
+                "FROM pg_roles WHERE rolname = current_user"
+            )
+        ).one()
+    engine.dispose()
+    assert tuple(attributes) == (False, False, False, False, False)
+
+
+def test_missing_context_fails_closed_for_read_write_and_insert(rls_records):
+    engine = create_engine(RUNTIME_URL)
+    with engine.connect() as connection:
+        transaction = connection.begin()
+        assert connection.scalar(text("SELECT count(1) FROM knowledge_bases")) == 0
+        assert (
+            connection.execute(
+                text("UPDATE knowledge_bases SET description = 'forbidden' WHERE id = :id"),
+                {"id": rls_records["kb_b"]},
+            ).rowcount
+            == 0
+        )
+        assert (
+            connection.execute(
+                text("DELETE FROM knowledge_bases WHERE id = :id"),
+                {"id": rls_records["kb_b"]},
+            ).rowcount
+            == 0
+        )
+        with pytest.raises(DBAPIError):
+            connection.execute(
+                text(
+                    "INSERT INTO users (id, tenant_id, username, role, enabled) "
+                    "VALUES (:id, :tenant, :username, 'user', true)"
+                ),
+                {
+                    "id": str(uuid.uuid4()),
+                    "tenant": rls_records["tenant_b"],
+                    "username": f"missing-context-{uuid.uuid4().hex}",
+                },
+            )
+        transaction.rollback()
+    engine.dispose()
+
+
 def test_pooled_connection_does_not_retain_previous_tenant(rls_records):
     engine = create_engine(RUNTIME_URL, pool_size=1, max_overflow=0)
     with engine.begin() as connection:
