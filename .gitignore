@@ -18,6 +18,9 @@ __pycache__/
 coverage.xml
 htmlcov/
 evaluation/reports/
+deploy/nginx/certs/*.crt
+deploy/nginx/certs/*.key
+.env.staging
 
 # Runtime data and logs
 logs/

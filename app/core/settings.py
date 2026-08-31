@@ -167,6 +167,7 @@ class Settings(BaseSettings):
     minio_img_dir: str = "images"
     minio_pdf_dir: str = "pdf_files"
     minio_secure: bool = False
+    minio_public_secure: bool = False
     minio_public_read: bool = False
     minio_presigned_expiry_seconds: int = Field(default=3600, ge=60, le=604800)
 
@@ -334,6 +335,8 @@ class Settings(BaseSettings):
                 raise ValueError("MINIO_ACCESS_KEY and MINIO_SECRET_KEY are required in production")
             if self.minio_public_read:
                 raise ValueError("MINIO_PUBLIC_READ is forbidden in production")
+            if not self.minio_public_secure:
+                raise ValueError("MINIO_PUBLIC_SECURE=true is required in production")
         return self
 
 

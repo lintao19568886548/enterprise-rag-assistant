@@ -72,7 +72,7 @@ def presign_minio_uri(uri: str) -> str:
         endpoint=minio_config.public_endpoint,
         access_key=minio_config.access_key,
         secret_key=minio_config.secret_key,
-        secure=minio_config.minio_secure,
+        secure=minio_config.public_secure,
     )
     return public_client.presigned_get_object(
         bucket_name,

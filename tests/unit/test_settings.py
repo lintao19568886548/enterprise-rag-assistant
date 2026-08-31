@@ -27,6 +27,7 @@ def _production_settings(**overrides):
         "minio_access_key": "minio-user",
         "minio_secret_key": "minio-secret",
         "minio_public_read": False,
+        "minio_public_secure": True,
     }
     values.update(overrides)
     return Settings(_env_file=None, **values)
@@ -72,6 +73,7 @@ def test_production_accepts_explicit_enterprise_dependencies():
         ({"oidc_audience": None}, "OIDC_ISSUER_URL, OIDC_CLIENT_ID"),
         ({"oidc_allowed_algorithms": "HS256"}, "secure asymmetric algorithms"),
         ({"minio_enabled": False}, "MINIO_ENABLED must be true"),
+        ({"minio_public_secure": False}, "MINIO_PUBLIC_SECURE=true"),
     ],
 )
 def test_production_rejects_unsafe_enterprise_overrides(override, expected_message):

@@ -511,7 +511,7 @@ async def rebuild_document_version(
         import_document_task.apply_async(
             args=[task_id, str(task_dir), str(local_file_path), principal.tenant_id, principal.user_id],
             task_id=task_id,
-            queue="imports",
+            queue="import",
         )
     else:
         background_tasks.add_task(
