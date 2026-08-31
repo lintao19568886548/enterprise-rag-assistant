@@ -6,7 +6,7 @@ import hashlib
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 
 from app.core.settings import settings
 from app.db.models import (
@@ -258,6 +258,11 @@ def register_document(
             .order_by(Document.current_version.desc())
         )
         if previous_version is not None:
+            session.execute(
+                update(DocumentVersion)
+                .where(DocumentVersion.document_id == previous_version.id)
+                .values(is_active=False)
+            )
             previous_version.current_version += 1
             previous_version.content_hash = saved.sha256
             previous_version.stored_filename = saved.stored_filename
@@ -273,6 +278,10 @@ def register_document(
                 parser_version="mineru-v4",
                 chunk_strategy_version="heading-v1",
                 embedding_model=settings.embedding_model,
+                is_active=True,
+                source_object_path=object_storage_path,
+                source_local_path=str(saved.path),
+                activated_at=datetime.now(UTC),
             )
             session.add(version)
             session.flush()
@@ -300,6 +309,10 @@ def register_document(
             parser_version="mineru-v4",
             chunk_strategy_version="heading-v1",
             embedding_model=settings.embedding_model,
+            is_active=True,
+            source_object_path=object_storage_path,
+            source_local_path=str(saved.path),
+            activated_at=datetime.now(UTC),
         )
         session.add(version)
         session.flush()
@@ -339,6 +352,14 @@ def set_document_object_path(document_id: str, object_storage_path: str) -> None
         document = session.get(Document, document_id)
         if document is not None:
             document.object_storage_path = object_storage_path
+            version = session.scalar(
+                select(DocumentVersion).where(
+                    DocumentVersion.document_id == document.id,
+                    DocumentVersion.version == document.current_version,
+                )
+            )
+            if version is not None:
+                version.source_object_path = object_storage_path
 
 
 def update_import_task(
@@ -534,6 +555,14 @@ def replace_chunk_metadata(
                     milvus_chunk_id=milvus_id,
                 )
             )
+        version = session.scalar(
+            select(DocumentVersion).where(
+                DocumentVersion.document_id == document_id,
+                DocumentVersion.version == document_version,
+            )
+        )
+        if version is not None:
+            version.chunk_count = len(chunks)
 
 
 def save_chat_message(

@@ -7,6 +7,8 @@ from app.core.metrics import IMPORT_TASKS
 from app.core.errors import classify_exception
 from app.core.settings import settings
 from app.core.tenant_context import identity_context
+from app.core.tenant_context import current_identity_context
+from app.db.lifecycle_repositories import activate_document_version
 from app.db.repositories import (
     DEFAULT_TENANT_ID,
     DEFAULT_USER_ID,
@@ -124,6 +126,14 @@ def _run_import_graph_in_context(task_id: str, local_dir: str, local_file_path: 
                 document.knowledge_base_id,
                 list(final_state.get("chunks") or []),
             )
+            if task_record.document_version != document.current_version:
+                identity = current_identity_context()
+                activate_document_version(
+                    document.id,
+                    task_record.document_version,
+                    document.tenant_id,
+                    identity.get("user_id") or "system",
+                )
         update_task_status(task_id, TASK_STATUS_COMPLETED)
         update_import_task(task_id, TASK_STATUS_COMPLETED, current_node="completed", progress=100)
         logger.info("[{}] 导入工作流执行完成", task_id)

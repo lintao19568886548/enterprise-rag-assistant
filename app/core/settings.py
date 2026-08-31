@@ -124,6 +124,9 @@ class Settings(BaseSettings):
     celery_broker_url: str | None = None
     celery_result_backend: str | None = None
     celery_task_max_retries: int = Field(default=3, ge=0, le=20)
+    cleanup_max_retries: int = Field(default=5, ge=1, le=50)
+    cleanup_retry_base_seconds: int = Field(default=5, ge=1, le=3600)
+    cleanup_retry_max_seconds: int = Field(default=600, ge=1, le=86400)
 
     database_enabled: bool = True
     database_url: str = f"sqlite:///{(PROJECT_ROOT / 'data' / 'knowledge_base.db').as_posix()}"

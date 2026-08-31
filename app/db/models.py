@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, JSON, String, Text, UniqueConstraint, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, JSON, String, Text, UniqueConstraint, func, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -161,6 +161,7 @@ class Document(TimestampMixin, Base):
         UniqueConstraint("knowledge_base_id", "content_hash", name="uq_document_kb_hash"),
         Index("ix_documents_kb_status", "knowledge_base_id", "status"),
         Index("ix_documents_tenant_status", "tenant_id", "status"),
+        Index("ix_documents_tenant_lifecycle", "tenant_id", "lifecycle_status"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
@@ -177,13 +178,23 @@ class Document(TimestampMixin, Base):
     file_size: Mapped[int] = mapped_column(Integer, nullable=False)
     current_version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     status: Mapped[str] = mapped_column(String(32), default="pending", nullable=False)
+    lifecycle_status: Mapped[str] = mapped_column(String(32), default="ACTIVE", nullable=False)
     object_storage_path: Mapped[str | None] = mapped_column(String(1024))
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class DocumentVersion(Base):
     __tablename__ = "document_versions"
-    __table_args__ = (UniqueConstraint("document_id", "version", name="uq_document_version"),)
+    __table_args__ = (
+        UniqueConstraint("document_id", "version", name="uq_document_version"),
+        Index(
+            "uq_document_active_version",
+            "document_id",
+            unique=True,
+            postgresql_where=text("is_active"),
+            sqlite_where=text("is_active = 1"),
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
     tenant_id: Mapped[str] = mapped_column(
@@ -195,6 +206,12 @@ class DocumentVersion(Base):
     parser_version: Mapped[str] = mapped_column(String(64), default="mineru-v4", nullable=False)
     chunk_strategy_version: Mapped[str] = mapped_column(String(64), default="heading-v1", nullable=False)
     embedding_model: Mapped[str] = mapped_column(String(255), nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    chunk_count: Mapped[int | None] = mapped_column(Integer)
+    source_object_path: Mapped[str | None] = mapped_column(String(1024))
+    source_local_path: Mapped[str | None] = mapped_column(String(2048))
+    activated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    activated_by: Mapped[str | None] = mapped_column(String(128))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -353,3 +370,32 @@ class AuditLog(Base):
     request_id: Mapped[str | None] = mapped_column(String(64))
     trace_id: Mapped[str | None] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class OutboxEvent(TimestampMixin, Base):
+    __tablename__ = "outbox_events"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "deduplication_key", name="uq_outbox_tenant_dedup"),
+        Index("ix_outbox_status_next_retry", "status", "next_retry_at"),
+        Index("ix_outbox_tenant_created", "tenant_id", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    tenant_id: Mapped[str] = mapped_column(
+        ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    aggregate_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    aggregate_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(128), nullable=False)
+    deduplication_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), default="PENDING", nullable=False)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    max_attempts: Mapped[int] = mapped_column(Integer, default=5, nullable=False)
+    last_error_code: Mapped[str | None] = mapped_column(String(128))
+    last_error_summary: Mapped[str | None] = mapped_column(String(1024))
+    next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    requested_by: Mapped[str | None] = mapped_column(String(128))
+    request_id: Mapped[str | None] = mapped_column(String(64))
+    trace_id: Mapped[str | None] = mapped_column(String(64))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
