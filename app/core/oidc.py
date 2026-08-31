@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import secrets
 import threading
 import time
 import urllib.request
@@ -34,24 +35,39 @@ class OIDCJWKSCache:
         self._lock = threading.Lock()
         self._expires_at = 0.0
         self._issuer = ""
+        self._metadata: dict[str, Any] | None = None
         self._jwks_client: PyJWKClient | None = None
 
     def clear(self) -> None:
         with self._lock:
             self._expires_at = 0.0
             self._issuer = ""
+            self._metadata = None
             self._jwks_client = None
+
+    def get_metadata(self, config: Settings = settings) -> dict[str, Any]:
+        issuer = (config.oidc_issuer_url or "").rstrip("/")
+        now = time.monotonic()
+        with self._lock:
+            if self._metadata is not None and self._issuer == issuer and now < self._expires_at:
+                return dict(self._metadata)
+            metadata = self._load_metadata(issuer, config)
+            if str(metadata.get("issuer", "")).rstrip("/") != issuer:
+                raise OIDCTokenError("OIDC discovery issuer mismatch")
+            self._metadata = metadata
+            self._issuer = issuer
+            self._expires_at = now + config.oidc_jwks_cache_seconds
+            self._jwks_client = None
+            return dict(metadata)
 
     def get_client(self, config: Settings = settings) -> PyJWKClient:
         issuer = (config.oidc_issuer_url or "").rstrip("/")
+        metadata = self.get_metadata(config)
         now = time.monotonic()
         with self._lock:
             if self._jwks_client is not None and self._issuer == issuer and now < self._expires_at:
                 return self._jwks_client
-            metadata = self._load_metadata(issuer, config)
             jwks_uri = str(metadata.get("jwks_uri", ""))
-            if str(metadata.get("issuer", "")).rstrip("/") != issuer:
-                raise OIDCTokenError("OIDC discovery issuer mismatch")
             self._validate_remote_uri(jwks_uri, config)
             self._jwks_client = PyJWKClient(
                 jwks_uri,
@@ -68,8 +84,8 @@ class OIDCJWKSCache:
         parsed = urlparse(uri)
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
             raise OIDCTokenError("OIDC JWKS URI is invalid")
-        if config.is_production and parsed.scheme != "https":
-            raise OIDCTokenError("OIDC endpoints must use HTTPS in production")
+        if config.is_deployed and parsed.scheme != "https":
+            raise OIDCTokenError("OIDC endpoints must use HTTPS when deployed")
 
     def _load_metadata(self, issuer: str, config: Settings) -> dict[str, Any]:
         if not issuer:
@@ -96,6 +112,10 @@ class OIDCJWKSCache:
 
 
 jwks_cache = OIDCJWKSCache()
+
+
+def validate_oidc_endpoint(uri: str, config: Settings = settings) -> None:
+    OIDCJWKSCache._validate_remote_uri(uri, config)
 
 
 def decode_oidc_token(
@@ -145,4 +165,49 @@ def decode_oidc_token(
     authorized_party = claims.get("azp") or claims.get("client_id")
     if authorized_party is not None and authorized_party != config.oidc_client_id:
         raise OIDCTokenError("OIDC authorized party is invalid")
+    return OIDCClaims(issuer=issuer.rstrip("/"), subject=subject, claims=claims)
+
+
+def decode_oidc_id_token(
+    token: str,
+    *,
+    nonce: str,
+    config: Settings = settings,
+    signing_key: Any | None = None,
+) -> OIDCClaims:
+    """Validate an OIDC ID token including the one-time login nonce."""
+    if not token or len(token) > 16_384 or not nonce:
+        raise OIDCTokenError("OIDC ID token is invalid")
+    try:
+        header = jwt.get_unverified_header(token)
+    except jwt.PyJWTError as exc:
+        raise OIDCTokenError("OIDC ID token header is invalid") from exc
+    algorithm = str(header.get("alg", "")).upper()
+    if algorithm not in config.oidc_algorithms:
+        raise OIDCTokenError("OIDC ID token algorithm is not allowed")
+    token_type = str(header.get("typ", "jwt")).lower()
+    if token_type != "jwt":
+        raise OIDCTokenError("OIDC ID token type is invalid")
+    try:
+        if signing_key is None:
+            signing_key = jwks_cache.get_client(config).get_signing_key_from_jwt(token).key
+        claims = jwt.decode(
+            token,
+            signing_key,
+            algorithms=config.oidc_algorithms,
+            audience=config.oidc_client_id,
+            issuer=(config.oidc_issuer_url or "").rstrip("/"),
+            leeway=config.oidc_clock_skew_seconds,
+            options={"require": ["exp", "iss", "aud", "sub", "nonce"]},
+        )
+    except jwt.PyJWTError as exc:
+        raise OIDCTokenError("OIDC ID token validation failed") from exc
+    if not isinstance(claims, dict) or not secrets.compare_digest(str(claims.get("nonce", "")), nonce):
+        raise OIDCTokenError("OIDC ID token nonce is invalid")
+    subject = claims.get("sub")
+    issuer = claims.get("iss")
+    if not isinstance(subject, str) or not subject.strip():
+        raise OIDCTokenError("OIDC subject is missing")
+    if not isinstance(issuer, str) or not issuer.strip():
+        raise OIDCTokenError("OIDC issuer is missing")
     return OIDCClaims(issuer=issuer.rstrip("/"), subject=subject, claims=claims)

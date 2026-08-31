@@ -8,6 +8,8 @@ def _production_settings(**overrides):
     database_password = ("Db7Qa9Lm" + "2Nx5Zr4V") * 2
     redis_password = ("Rd8Wp3Kz" + "6Tv4Yq2N") * 2
     checkpoint_key = "K9!xP2@zL4#qM7$s" * 2
+    oidc_client_secret = ("Oc7Qm2Vz" + "9Lp4Rx6N") * 2
+    oidc_session_key = "O8!sP3@vK6#rT2$x" * 2
     minio_access_key = "M8x!Q2z@L7p#N4v$"
     minio_secret_key = ("S7y!R3w@" + "K8m#T5q$") * 2
     values = {
@@ -16,7 +18,11 @@ def _production_settings(**overrides):
         "oidc_enabled": True,
         "oidc_issuer_url": "https://id.example.com/realms/enterprise",
         "oidc_client_id": "enterprise-rag-assistant",
+        "oidc_client_secret": oidc_client_secret,
         "oidc_audience": "enterprise-rag-api",
+        "oidc_redirect_uri": "https://rag.example.com/auth/callback",
+        "oidc_post_logout_redirect_uri": "https://rag.example.com/chat.html",
+        "oidc_session_encryption_key": oidc_session_key,
         "oidc_allowed_algorithms": "RS256",
         "redis_enabled": True,
         "redis_url": f"redis://:{redis_password}@redis:6379/0",
@@ -78,6 +84,10 @@ def test_production_accepts_explicit_enterprise_dependencies():
         ({"oidc_enabled": False}, "OIDC_ENABLED must be true"),
         ({"oidc_audience": None}, "OIDC_ISSUER_URL, OIDC_CLIENT_ID"),
         ({"oidc_allowed_algorithms": "HS256"}, "secure asymmetric algorithms"),
+        ({"oidc_client_secret": None}, "OIDC_CLIENT_SECRET"),
+        ({"oidc_redirect_uri": "http://rag.example.com/auth/callback"}, "OIDC_REDIRECT_URI"),
+        ({"oidc_scopes": "profile email"}, "OIDC_SCOPES"),
+        ({"oidc_session_encryption_key": None}, "OIDC_SESSION_ENCRYPTION_KEY"),
         ({"minio_enabled": False}, "MINIO_ENABLED must be true"),
         ({"minio_public_secure": False}, "MINIO_PUBLIC_SECURE=true"),
     ],

@@ -379,6 +379,9 @@
             <label>生产环境 API Key
                 <input id="apiKey" type="password" autocomplete="off" placeholder="开发模式可留空">
             </label>
+            <button id="oidcLogin" type="button" hidden>企业登录</button>
+            <button id="oidcLogout" type="button" hidden>退出登录</button>
+            <span id="identityStatus" role="status">身份：开发模式</span>
         </div>
 
         <section class="manager" aria-labelledby="managerTitle">
@@ -423,12 +426,49 @@
         const refreshDocumentsBtn = document.getElementById('refreshDocuments');
         const documentListEl = document.getElementById('documentList');
         const managerStatusEl = document.getElementById('managerStatus');
+        const oidcLoginBtn = document.getElementById('oidcLogin');
+        const oidcLogoutBtn = document.getElementById('oidcLogout');
+        const identityStatusEl = document.getElementById('identityStatus');
         apiKeyEl.value = sessionStorage.getItem('kb_import_api_key') || '';
         const DEFAULT_KB_ID = '00000000-0000-0000-0000-000000000010';
 
         function authHeaders() {
             const key = (apiKeyEl.value || '').trim();
             return key ? {'X-API-Key': key} : {};
+        }
+
+        function submitLogout() {
+            const form = document.createElement('form');
+            form.method = 'POST';
+            form.action = `${API_BASE}/auth/logout`;
+            document.body.appendChild(form);
+            form.submit();
+        }
+
+        async function updateIdentity() {
+            try {
+                const configResponse = await fetch(`${API_BASE}/auth/config`);
+                const config = configResponse.ok ? await configResponse.json() : {enabled: false};
+                if (!config.enabled) {
+                    identityStatusEl.textContent = '身份：开发模式';
+                    oidcLoginBtn.hidden = true;
+                    oidcLogoutBtn.hidden = true;
+                    return;
+                }
+                const meResponse = await fetch(`${API_BASE}/auth/me`);
+                if (meResponse.ok) {
+                    const me = await meResponse.json();
+                    identityStatusEl.textContent = `身份：${me.role}`;
+                    oidcLoginBtn.hidden = true;
+                    oidcLogoutBtn.hidden = false;
+                } else {
+                    identityStatusEl.textContent = '身份：未登录';
+                    oidcLoginBtn.hidden = false;
+                    oidcLogoutBtn.hidden = true;
+                }
+            } catch (_error) {
+                identityStatusEl.textContent = '身份：状态未知';
+            }
         }
 
         async function loadKnowledgeBases() {
@@ -581,6 +621,12 @@
         // 初始化
         function init() {
             loadKnowledgeBases();
+            updateIdentity();
+            oidcLoginBtn.addEventListener('click', () => {
+                const returnTo = `${location.pathname}${location.search}`;
+                location.assign(`${API_BASE}/auth/login?return_to=${encodeURIComponent(returnTo)}`);
+            });
+            oidcLogoutBtn.addEventListener('click', submitLogout);
             apiKeyEl.addEventListener('change', () => {
                 sessionStorage.setItem('kb_import_api_key', (apiKeyEl.value || '').trim());
                 loadKnowledgeBases();

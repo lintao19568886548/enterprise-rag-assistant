@@ -54,6 +54,8 @@ _SECRET_VALUES = tuple(
         settings.reveal(settings.user_api_keys),
         settings.reveal(settings.readonly_api_keys),
         settings.reveal(settings.langgraph_aes_key),
+        settings.reveal(settings.oidc_client_secret),
+        settings.reveal(settings.oidc_session_encryption_key),
         settings.reveal(settings.milvus_token),
         settings.redis_dsn,
         settings.database_dsn,

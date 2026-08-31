@@ -4,7 +4,7 @@ import jwt
 import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
 
-from app.core.oidc import OIDCTokenError, decode_oidc_token
+from app.core.oidc import OIDCTokenError, decode_oidc_id_token, decode_oidc_token
 from app.core.security import Principal, hash_service_account_secret, verify_service_account_secret
 from app.core.settings import Settings
 
@@ -50,6 +50,20 @@ def _token(private_key, **claim_overrides):
     return jwt.encode(claims, private_key, algorithm="RS256", headers={"typ": "at+jwt"})
 
 
+def _id_token(private_key, **claim_overrides):
+    now = datetime.now(UTC)
+    claims = {
+        "iss": ISSUER,
+        "sub": "employee-123",
+        "aud": CLIENT_ID,
+        "iat": now,
+        "exp": now + timedelta(minutes=5),
+        "nonce": "one-time-nonce",
+    }
+    claims.update(claim_overrides)
+    return jwt.encode(claims, private_key, algorithm="RS256", headers={"typ": "JWT"})
+
+
 def test_valid_oidc_access_token_is_accepted(keys):
     private_key, public_key = keys
     claims = decode_oidc_token(
@@ -89,6 +103,36 @@ def test_wrong_oidc_signature_is_rejected(keys):
             _token(private_key),
             config=_config(),
             signing_key=other_key.public_key(),
+        )
+
+
+def test_valid_oidc_id_token_requires_matching_nonce(keys):
+    private_key, public_key = keys
+    claims = decode_oidc_id_token(
+        _id_token(private_key),
+        nonce="one-time-nonce",
+        config=_config(),
+        signing_key=public_key,
+    )
+    assert claims.subject == "employee-123"
+
+
+@pytest.mark.parametrize(
+    ("claim_overrides", "nonce"),
+    [
+        ({"nonce": "attacker-nonce"}, "one-time-nonce"),
+        ({"aud": "wrong-client"}, "one-time-nonce"),
+        ({"exp": datetime.now(UTC) - timedelta(minutes=1)}, "one-time-nonce"),
+    ],
+)
+def test_invalid_oidc_id_token_is_rejected(keys, claim_overrides, nonce):
+    private_key, public_key = keys
+    with pytest.raises(OIDCTokenError):
+        decode_oidc_id_token(
+            _id_token(private_key, **claim_overrides),
+            nonce=nonce,
+            config=_config(),
+            signing_key=public_key,
         )
 
 

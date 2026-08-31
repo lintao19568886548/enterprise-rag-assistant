@@ -1,0 +1,63 @@
+{
+  "realm": "enterprise-local",
+  "enabled": true,
+  "displayName": "Enterprise RAG Local Test",
+  "registrationAllowed": false,
+  "resetPasswordAllowed": false,
+  "rememberMe": false,
+  "bruteForceProtected": true,
+  "clients": [
+    {
+      "clientId": "enterprise-rag",
+      "name": "Enterprise RAG Local Client",
+      "enabled": true,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "${LOCAL_OIDC_CLIENT_SECRET}",
+      "publicClient": false,
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "redirectUris": [
+        "http://127.0.0.1:8001/auth/callback"
+      ],
+      "webOrigins": [
+        "http://127.0.0.1:8001"
+      ],
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "post.logout.redirect.uris": "http://127.0.0.1:8001/*"
+      },
+      "protocol": "openid-connect",
+      "protocolMappers": [
+        {
+          "name": "enterprise-rag-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "enterprise-rag",
+            "access.token.claim": "true",
+            "id.token.claim": "false"
+          }
+        }
+      ]
+    }
+  ],
+  "users": [
+    {
+      "id": "11111111-1111-4111-8111-111111111111",
+      "username": "oidc-local-admin",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Local",
+      "lastName": "Administrator",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "${LOCAL_OIDC_USER_PASSWORD}",
+          "temporary": false
+        }
+      ]
+    }
+  ]
+}

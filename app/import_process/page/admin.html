@@ -30,6 +30,9 @@
     <div class="auth">
       <label class="sr-only" for="credential">API Key 或 Bearer Token</label>
       <input id="credential" type="password" autocomplete="off" placeholder="开发模式可留空；生产环境输入凭据">
+      <a class="button-link" id="oidcLogin" href="/auth/login?return_to=%2Fadmin.html" hidden>企业登录</a>
+      <button id="oidcLogout" type="button" hidden>退出登录</button>
+      <span id="identityStatus" class="meta">身份：开发模式</span>
       <button id="refreshAll" type="button">刷新全部</button>
       <a class="button-link" href="/import.html">文件导入</a>
     </div>
@@ -81,6 +84,8 @@
   credential.value=sessionStorage.getItem('enterprise_admin_credential')||'';
   const safe=v=>String(v??'');
   function authHeaders(json=false){const value=credential.value.trim();const headers={};if(value){if(value.split('.').length===3)headers.Authorization=`Bearer ${value}`;else headers['X-API-Key']=value;}if(json)headers['Content-Type']='application/json';return headers}
+  function submitLogout(){const form=document.createElement('form');form.method='POST';form.action='/auth/logout';document.body.appendChild(form);form.submit()}
+  async function updateIdentity(){try{const configResponse=await fetch('/auth/config'),config=configResponse.ok?await configResponse.json():{enabled:false};if(!config.enabled){$('identityStatus').textContent='身份：开发模式';$('oidcLogin').hidden=true;$('oidcLogout').hidden=true;return}const meResponse=await fetch('/auth/me');if(meResponse.ok){const me=await meResponse.json();$('identityStatus').textContent=`身份：${me.role}`;$('oidcLogin').hidden=true;$('oidcLogout').hidden=false}else{$('identityStatus').textContent='身份：未登录';$('oidcLogin').hidden=false;$('oidcLogout').hidden=true}}catch(_error){$('identityStatus').textContent='身份：状态未知'}}
   function notice(message,error=false){$('notice').textContent=message;$('notice').classList.toggle('error',error)}
   async function api(path,options={}){const response=await fetch(`${API}${path}`,{...options,headers:{...authHeaders(Boolean(options.body)),...(options.headers||{})}});let data={};try{data=await response.json()}catch{data={}}if(!response.ok){const code=safe(data.code||data.error_code||response.status);const message=safe(data.message||data.detail||'请求失败');throw new Error(`${code}: ${message}`)}return data}
   function el(tag,text,className){const node=document.createElement(tag);if(text!==undefined)node.textContent=safe(text);if(className)node.className=className;return node}
@@ -115,7 +120,7 @@
   credential.addEventListener('change',()=>sessionStorage.setItem('enterprise_admin_credential',credential.value));
   document.querySelectorAll('.tab').forEach(tab=>tab.addEventListener('click',()=>{document.querySelectorAll('.tab').forEach(x=>x.setAttribute('aria-selected',String(x===tab)));document.querySelectorAll('[role="tabpanel"]').forEach(x=>x.hidden=x.id!==tab.dataset.panel)}));
   async function refreshAll(){notice('正在刷新租户范围内的管理数据…');try{sessionStorage.setItem('enterprise_admin_credential',credential.value);await Promise.all([loadSummary(),loadIdentity(),loadOperations(),loadAudits()]);await loadDocuments();notice('管理数据已刷新')}catch(err){notice(err.message||'刷新失败',true)}}
-  $('refreshAll').addEventListener('click',refreshAll);window.addEventListener('DOMContentLoaded',refreshAll);
+  $('oidcLogout').addEventListener('click',submitLogout);$('refreshAll').addEventListener('click',refreshAll);window.addEventListener('DOMContentLoaded',async()=>{await updateIdentity();await refreshAll()});
 </script>
 </body>
 </html>

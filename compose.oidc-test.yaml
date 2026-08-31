@@ -1,0 +1,44 @@
+name: enterprise-rag-oidc-test
+
+services:
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.7.2
+    command: ["start-dev", "--import-realm", "--health-enabled=true"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${LOCAL_KEYCLOAK_ADMIN_USERNAME:-local-admin}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${LOCAL_KEYCLOAK_ADMIN_PASSWORD:?set LOCAL_KEYCLOAK_ADMIN_PASSWORD}
+      LOCAL_OIDC_CLIENT_SECRET: ${LOCAL_OIDC_CLIENT_SECRET:?set LOCAL_OIDC_CLIENT_SECRET}
+      LOCAL_OIDC_USER_PASSWORD: ${LOCAL_OIDC_USER_PASSWORD:?set LOCAL_OIDC_USER_PASSWORD}
+    volumes:
+      - ./deploy/keycloak/enterprise-local-realm.json:/opt/keycloak/data/import/enterprise-local-realm.json:ro
+    ports:
+      - "127.0.0.1:8080:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/9000'"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 45s
+    restart: unless-stopped
+
+  oidc-redis:
+    image: redis:7.4-bookworm
+    command:
+      - sh
+      - -c
+      - exec redis-server --appendonly yes --requirepass "$$LOCAL_OIDC_REDIS_PASSWORD"
+    environment:
+      LOCAL_OIDC_REDIS_PASSWORD: ${LOCAL_OIDC_REDIS_PASSWORD:?set LOCAL_OIDC_REDIS_PASSWORD}
+    ports:
+      - "127.0.0.1:6380:6379"
+    healthcheck:
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$$LOCAL_OIDC_REDIS_PASSWORD\" redis-cli ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - oidc-redis-data:/data
+    restart: unless-stopped
+
+volumes:
+  oidc-redis-data:

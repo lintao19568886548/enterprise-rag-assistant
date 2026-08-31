@@ -82,11 +82,20 @@ class Settings(BaseSettings):
     oidc_enabled: bool = False
     oidc_issuer_url: str | None = None
     oidc_client_id: str | None = None
+    oidc_client_secret: SecretStr | None = None
     oidc_audience: str | None = None
+    oidc_redirect_uri: str | None = None
+    oidc_post_logout_redirect_uri: str | None = None
+    oidc_scopes: str = "openid profile email"
     oidc_jwks_cache_seconds: int = Field(default=300, ge=30, le=86400)
     oidc_allowed_algorithms: str = "RS256"
     oidc_clock_skew_seconds: int = Field(default=30, ge=0, le=300)
     oidc_http_timeout_seconds: float = Field(default=5.0, gt=0, le=30)
+    oidc_transaction_ttl_seconds: int = Field(default=300, ge=60, le=900)
+    oidc_session_ttl_seconds: int = Field(default=28800, ge=300, le=86400)
+    oidc_session_encryption_key: SecretStr | None = None
+    oidc_session_cookie_name: str = Field(default="kb_oidc_session", min_length=4, max_length=64)
+    oidc_state_cookie_name: str = Field(default="kb_oidc_state", min_length=4, max_length=64)
     admin_api_keys: SecretStr | None = None
     user_api_keys: SecretStr | None = None
     readonly_api_keys: SecretStr | None = None
@@ -236,6 +245,10 @@ class Settings(BaseSettings):
         ]
 
     @property
+    def oidc_scope_values(self) -> list[str]:
+        return [value.strip() for value in self.oidc_scopes.split() if value.strip()]
+
+    @property
     def cors_origins(self) -> list[str]:
         return [value.strip() for value in self.cors_allowed_origins.split(",") if value.strip()]
 
@@ -340,6 +353,10 @@ class Settings(BaseSettings):
             key_length = len(raw_checkpoint_key.encode("utf-8"))
             if key_length not in {16, 24, 32}:
                 raise ValueError("LANGGRAPH_AES_KEY must be 16, 24, or 32 UTF-8 bytes")
+        if self.oidc_session_encryption_key:
+            oidc_key = self.reveal(self.oidc_session_encryption_key) or ""
+            if len(oidc_key.encode("utf-8")) != 32:
+                raise ValueError("OIDC_SESSION_ENCRYPTION_KEY must be exactly 32 UTF-8 bytes")
         secure_oidc_algorithms = {"RS256", "RS384", "RS512", "ES256", "ES384", "ES512"}
         if self.oidc_enabled:
             if not self.oidc_issuer_url or not self.oidc_client_id or not self.oidc_audience:
@@ -360,6 +377,24 @@ class Settings(BaseSettings):
                 raise ValueError("OIDC_ENABLED must be true in staging/production")
             if not self.oidc_issuer_url or not self.oidc_issuer_url.lower().startswith("https://"):
                 raise ValueError("OIDC_ISSUER_URL must use HTTPS in staging/production")
+            if not self.oidc_client_secret:
+                raise ValueError("OIDC_CLIENT_SECRET is required in staging/production")
+            _validate_deployed_secret(
+                "OIDC_CLIENT_SECRET",
+                self.reveal(self.oidc_client_secret),
+                minimum_length=24,
+            )
+            if not self.oidc_redirect_uri or not self.oidc_redirect_uri.lower().startswith("https://"):
+                raise ValueError("OIDC_REDIRECT_URI must use HTTPS in staging/production")
+            if "openid" not in self.oidc_scope_values:
+                raise ValueError("OIDC_SCOPES must include openid")
+            if not self.oidc_session_encryption_key:
+                raise ValueError("OIDC_SESSION_ENCRYPTION_KEY is required in staging/production")
+            _validate_deployed_secret(
+                "OIDC_SESSION_ENCRYPTION_KEY",
+                self.reveal(self.oidc_session_encryption_key),
+                minimum_length=32,
+            )
             if self.log_sensitive_content:
                 raise ValueError("LOG_SENSITIVE_CONTENT must be false in staging/production")
             if self.task_backend == "memory":
