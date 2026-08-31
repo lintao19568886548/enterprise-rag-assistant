@@ -5,6 +5,11 @@ from app.core.settings import Settings
 
 
 def _production_settings(**overrides):
+    database_password = ("Db7Qa9Lm" + "2Nx5Zr4V") * 2
+    redis_password = ("Rd8Wp3Kz" + "6Tv4Yq2N") * 2
+    checkpoint_key = "K9!xP2@zL4#qM7$s" * 2
+    minio_access_key = "M8x!Q2z@L7p#N4v$"
+    minio_secret_key = ("S7y!R3w@" + "K8m#T5q$") * 2
     values = {
         "app_env": "production",
         "auth_enabled": True,
@@ -14,18 +19,19 @@ def _production_settings(**overrides):
         "oidc_audience": "enterprise-rag-api",
         "oidc_allowed_algorithms": "RS256",
         "redis_enabled": True,
+        "redis_url": f"redis://:{redis_password}@redis:6379/0",
         "task_backend": "redis",
         "task_queue_enabled": True,
         "database_enabled": True,
-        "database_url": "postgresql+psycopg://app:test@db/app",
+        "database_url": f"postgresql+psycopg://app:{database_password}@db/app",
         "langgraph_checkpointer": "postgres",
-        "langgraph_database_url": "postgresql://app:test@db/app",
-        "langgraph_aes_key": "k" * 32,
+        "langgraph_database_url": f"postgresql://app:{database_password}@db/app",
+        "langgraph_aes_key": checkpoint_key,
         "knowledge_base_filter_enabled": True,
         "llm_allowed_models": "qwen-plus",
         "minio_enabled": True,
-        "minio_access_key": "minio-user",
-        "minio_secret_key": "minio-secret",
+        "minio_access_key": minio_access_key,
+        "minio_secret_key": minio_secret_key,
         "minio_public_read": False,
         "minio_public_secure": True,
     }
@@ -79,6 +85,32 @@ def test_production_accepts_explicit_enterprise_dependencies():
 def test_production_rejects_unsafe_enterprise_overrides(override, expected_message):
     with pytest.raises(ValidationError, match=expected_message):
         _production_settings(**override)
+
+
+@pytest.mark.parametrize(
+    ("override", "expected_message"),
+    [
+        ({"redis_url": "redis://redis:6379/0"}, "REDIS_URL password"),
+        (
+            {"database_url": "postgresql+psycopg://app:weak@db/app"},
+            "DATABASE_URL password",
+        ),
+        ({"langgraph_aes_key": "x" * 32}, "LANGGRAPH_AES_KEY"),
+        ({"minio_secret_key": "change-me-to-a-random-secret-value"}, "MINIO_SECRET_KEY"),
+        ({"log_sensitive_content": True}, "LOG_SENSITIVE_CONTENT"),
+    ],
+)
+def test_production_rejects_weak_or_sensitive_deployed_configuration(
+    override,
+    expected_message,
+):
+    with pytest.raises(ValidationError, match=expected_message):
+        _production_settings(**override)
+
+
+def test_staging_enforces_the_same_fail_closed_security_baseline():
+    with pytest.raises(ValidationError, match="REDIS_URL password"):
+        _production_settings(app_env="staging", redis_url="redis://redis:6379/0")
 
 
 def test_redis_backend_requires_redis_to_be_enabled():

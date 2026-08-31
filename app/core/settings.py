@@ -5,11 +5,40 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
+from urllib.parse import unquote, urlsplit
 
 from pydantic import AliasChoices, Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+_WEAK_SECRET_MARKERS = (
+    "change-me",
+    "example",
+    "minioadmin",
+    "password",
+    "placeholder",
+    "replace",
+    "secret",
+    "test",
+)
+
+
+def _url_password(url: str) -> str | None:
+    try:
+        password = urlsplit(url).password
+    except ValueError:
+        return None
+    return unquote(password) if password else None
+
+
+def _validate_deployed_secret(name: str, value: str | None, *, minimum_length: int) -> None:
+    if not value:
+        raise ValueError(f"{name} must be configured in staging/production")
+    normalized = value.casefold()
+    if len(value) < minimum_length or any(marker in normalized for marker in _WEAK_SECRET_MARKERS):
+        raise ValueError(f"{name} is weak or still uses a placeholder")
+    if len(set(value)) < 6:
+        raise ValueError(f"{name} does not have enough character diversity")
 
 
 class Settings(BaseSettings):
@@ -195,6 +224,10 @@ class Settings(BaseSettings):
         return self.app_env == "production"
 
     @property
+    def is_deployed(self) -> bool:
+        return self.app_env in {"staging", "production"}
+
+    @property
     def oidc_algorithms(self) -> list[str]:
         return [
             value.strip().upper()
@@ -318,41 +351,96 @@ class Settings(BaseSettings):
                 secure_oidc_algorithms
             ):
                 raise ValueError("OIDC_ALLOWED_ALGORITHMS must contain only secure asymmetric algorithms")
-        if self.is_production:
+        if self.is_deployed:
             if "*" in self.cors_origins:
-                raise ValueError("CORS wildcard is forbidden in production")
+                raise ValueError("CORS wildcard is forbidden in staging/production")
             if not self.auth_enabled:
-                raise ValueError("AUTH_ENABLED must be true in production")
+                raise ValueError("AUTH_ENABLED must be true in staging/production")
             if not self.oidc_enabled:
-                raise ValueError("OIDC_ENABLED must be true in production")
+                raise ValueError("OIDC_ENABLED must be true in staging/production")
+            if not self.oidc_issuer_url or not self.oidc_issuer_url.lower().startswith("https://"):
+                raise ValueError("OIDC_ISSUER_URL must use HTTPS in staging/production")
+            if self.log_sensitive_content:
+                raise ValueError("LOG_SENSITIVE_CONTENT must be false in staging/production")
             if self.task_backend == "memory":
-                raise ValueError("TASK_BACKEND=memory is forbidden in production")
+                raise ValueError("TASK_BACKEND=memory is forbidden in staging/production")
             if not self.redis_enabled:
-                raise ValueError("REDIS_ENABLED must be true in production")
+                raise ValueError("REDIS_ENABLED must be true in staging/production")
+            _validate_deployed_secret(
+                "REDIS_URL password",
+                _url_password(self.redis_dsn),
+                minimum_length=24,
+            )
             if not self.task_queue_enabled:
-                raise ValueError("TASK_QUEUE_ENABLED must be true in production")
+                raise ValueError("TASK_QUEUE_ENABLED must be true in staging/production")
             if not self.database_enabled:
-                raise ValueError("DATABASE_ENABLED must be true in production")
+                raise ValueError("DATABASE_ENABLED must be true in staging/production")
             if self.database_dsn.lower().startswith("sqlite"):
-                raise ValueError("SQLite is forbidden in production; use PostgreSQL")
+                raise ValueError("SQLite is forbidden in staging/production; use PostgreSQL")
+            _validate_deployed_secret(
+                "DATABASE_URL password",
+                _url_password(self.database_dsn),
+                minimum_length=24,
+            )
             if self.langgraph_checkpointer != "postgres":
-                raise ValueError("LANGGRAPH_CHECKPOINTER=postgres is required in production")
+                raise ValueError("LANGGRAPH_CHECKPOINTER=postgres is required in staging/production")
             if not self.langgraph_database_dsn:
-                raise ValueError("LANGGRAPH_DATABASE_URL is required in production")
+                raise ValueError("LANGGRAPH_DATABASE_URL is required in staging/production")
+            _validate_deployed_secret(
+                "LANGGRAPH_DATABASE_URL password",
+                _url_password(self.langgraph_database_dsn),
+                minimum_length=24,
+            )
             if not self.langgraph_aes_key:
-                raise ValueError("LANGGRAPH_AES_KEY is required to encrypt production checkpoints")
+                raise ValueError("LANGGRAPH_AES_KEY is required to encrypt deployed checkpoints")
+            _validate_deployed_secret(
+                "LANGGRAPH_AES_KEY",
+                self.reveal(self.langgraph_aes_key),
+                minimum_length=32,
+            )
             if not self.knowledge_base_filter_enabled:
-                raise ValueError("KNOWLEDGE_BASE_FILTER_ENABLED must be true in production")
+                raise ValueError("KNOWLEDGE_BASE_FILTER_ENABLED must be true in staging/production")
             if not self.llm_allowed_models.strip():
-                raise ValueError("LLM_ALLOWED_MODELS must define an explicit production whitelist")
+                raise ValueError("LLM_ALLOWED_MODELS must define an explicit deployed whitelist")
+            if self.openai_base_url and not self.openai_base_url.lower().startswith("https://"):
+                raise ValueError("OPENAI_BASE_URL must use HTTPS in staging/production")
+            if self.openai_api_key:
+                _validate_deployed_secret(
+                    "OPENAI_API_KEY",
+                    self.reveal(self.openai_api_key),
+                    minimum_length=20,
+                )
+            if self.mineru_api_token:
+                _validate_deployed_secret(
+                    "MINERU_API_TOKEN",
+                    self.reveal(self.mineru_api_token),
+                    minimum_length=20,
+                )
+            for role_name in ("admin", "user", "readonly"):
+                for api_key in self.api_keys_for_role(role_name):
+                    _validate_deployed_secret(
+                        f"{role_name.upper()}_API_KEYS entry",
+                        api_key,
+                        minimum_length=32,
+                    )
             if not self.minio_enabled:
-                raise ValueError("MINIO_ENABLED must be true in production")
+                raise ValueError("MINIO_ENABLED must be true in staging/production")
             if not self.minio_access_key or not self.minio_secret_key:
-                raise ValueError("MINIO_ACCESS_KEY and MINIO_SECRET_KEY are required in production")
+                raise ValueError("MINIO_ACCESS_KEY and MINIO_SECRET_KEY are required when deployed")
+            _validate_deployed_secret(
+                "MINIO_ACCESS_KEY",
+                self.reveal(self.minio_access_key),
+                minimum_length=16,
+            )
+            _validate_deployed_secret(
+                "MINIO_SECRET_KEY",
+                self.reveal(self.minio_secret_key),
+                minimum_length=32,
+            )
             if self.minio_public_read:
-                raise ValueError("MINIO_PUBLIC_READ is forbidden in production")
+                raise ValueError("MINIO_PUBLIC_READ is forbidden in staging/production")
             if not self.minio_public_secure:
-                raise ValueError("MINIO_PUBLIC_SECURE=true is required in production")
+                raise ValueError("MINIO_PUBLIC_SECURE=true is required in staging/production")
         return self
 
 

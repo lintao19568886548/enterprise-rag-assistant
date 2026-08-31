@@ -13,11 +13,11 @@ x-app-environment: &app-environment
   OPENAI_BASE_URL: ${OPENAI_BASE_URL:?set OPENAI_BASE_URL}
   MINERU_API_TOKEN: ${MINERU_API_TOKEN:?set MINERU_API_TOKEN}
   REDIS_ENABLED: "true"
-  REDIS_URL: redis://redis:6379/0
+  REDIS_URL: redis://:${REDIS_PASSWORD:?set REDIS_PASSWORD}@redis:6379/0
   TASK_BACKEND: redis
   TASK_QUEUE_ENABLED: "true"
-  CELERY_BROKER_URL: redis://redis:6379/1
-  CELERY_RESULT_BACKEND: redis://redis:6379/2
+  CELERY_BROKER_URL: redis://:${REDIS_PASSWORD:?set REDIS_PASSWORD}@redis:6379/1
+  CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD:?set REDIS_PASSWORD}@redis:6379/2
   CELERY_TASK_MAX_RETRIES: "3"
   CLEANUP_MAX_RETRIES: "5"
   CLEANUP_RETRY_BASE_SECONDS: "5"
@@ -32,6 +32,7 @@ x-app-environment: &app-environment
   CHUNKS_COLLECTION: kb_chunks_active
   ITEM_NAME_COLLECTION: kb_item_names_active
   KNOWLEDGE_BASE_FILTER_ENABLED: "true"
+  LLM_ALLOWED_MODELS: ${LLM_ALLOWED_MODELS:-qwen-plus,qwen-vl-plus}
   MINIO_ENABLED: "true"
   MINIO_ENDPOINT: minio:9000
   MINIO_PUBLIC_ENDPOINT: ${STAGING_PUBLIC_HOST:-127.0.0.1}:9443
@@ -136,13 +137,18 @@ services:
 
   redis:
     image: redis:7.4-bookworm
-    command: ["redis-server", "--appendonly", "yes", "--save", "60", "1000"]
+    command:
+      - sh
+      - -c
+      - exec redis-server --appendonly yes --save 60 1000 --requirepass "$$REDIS_PASSWORD"
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD}
     volumes:
       - redis-data:/data
     expose: ["6379"]
     networks: [backend]
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$$REDIS_PASSWORD\" redis-cli ping"]
       interval: 10s
       timeout: 5s
       retries: 10
