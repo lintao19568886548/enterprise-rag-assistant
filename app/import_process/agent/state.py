@@ -5,13 +5,19 @@ from typing import TypedDict
 import copy
 from app.core.logger import logger
 
-class ImportGraphState(TypedDict):
+class ImportGraphState(TypedDict, total=False):
     """
     图的状态定义，包含所有节点产生和消费的数据字段。
     TypedDict 让我们在代码中能有自动补全和类型检查。
     使用字典式访问（如state["session_id"]、state.get("embedding_chunks")）
     """
     task_id: str          # 任务唯一ID，用于追踪日志
+    tenant_id: str
+    knowledge_base_id: str
+    document_id: str
+    document_version: int
+    original_filename: str
+    permission_scope: str
 
     # --- 流程控制标记 ---
     is_md_read_enabled: bool   # 是否启用 Markdown 读取路径
@@ -46,6 +52,12 @@ class ImportGraphState(TypedDict):
 # 定义图状态的默认初始值
 graph_default_state: ImportGraphState = {
     "task_id":"",
+    "tenant_id": "",
+    "knowledge_base_id": "",
+    "document_id": "",
+    "document_version": 1,
+    "original_filename": "",
+    "permission_scope": "private",
     "is_pdf_read_enabled": False,
     "is_md_read_enabled": False,
     "is_normal_split_enabled": True,

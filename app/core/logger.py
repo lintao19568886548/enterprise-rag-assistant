@@ -12,23 +12,20 @@
 6. 开箱即用：项目所有模块直接导入logger即可使用
 7. 位置终极精准：穿透loguru内部+工具类自身，完美显示业务模块实际调用位置
 """
-import sys
 import inspect
+import re
+import sys
 from pathlib import Path
-import os
-from dotenv import load_dotenv
-from loguru import logger
 
+from loguru import logger as loguru_logger
 
-# -------------------------- 第一步：加载.env配置文件 --------------------------
-load_dotenv()
+from app.core.settings import settings
 
-# -------------------------- 第二步：读取.env配置（带默认值，防止配置缺失） --------------------------
-LOG_CONSOLE_ENABLE = os.getenv("LOG_CONSOLE_ENABLE", "True").lower() == "true"
-LOG_CONSOLE_LEVEL = os.getenv("LOG_CONSOLE_LEVEL", "INFO").upper()
-LOG_FILE_ENABLE = os.getenv("LOG_FILE_ENABLE", "True").lower() == "true"
-LOG_FILE_LEVEL = os.getenv("LOG_FILE_LEVEL", "INFO").upper()
-LOG_FILE_RETENTION = os.getenv("LOG_FILE_RETENTION", "7 days")
+LOG_CONSOLE_ENABLE = settings.log_console_enable
+LOG_CONSOLE_LEVEL = settings.log_console_level.upper()
+LOG_FILE_ENABLE = settings.log_file_enable
+LOG_FILE_LEVEL = settings.log_file_level.upper()
+LOG_FILE_RETENTION = settings.log_file_retention
 
 # -------------------------- 第三步：定义日志路径（自动推导项目根） --------------------------
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -44,6 +41,28 @@ LOG_FORMAT = (
     "<level>{message}</level>"
 )
 
+
+_SECRET_VALUES = tuple(
+    value
+    for value in (
+        settings.reveal(settings.openai_api_key),
+        settings.reveal(settings.mineru_api_token),
+        settings.reveal(settings.minio_access_key),
+        settings.reveal(settings.minio_secret_key),
+    )
+    if value
+)
+_SECRET_PATTERN = re.compile(r"(?i)(?:sk-[a-z0-9_-]{12,}|bearer\s+[a-z0-9._-]{12,})")
+
+
+def _redact_record(record):
+    """Remove configured credentials and common token forms before writing."""
+    message = str(record["message"])
+    for secret in _SECRET_VALUES:
+        message = message.replace(secret, "***REDACTED***")
+    record["message"] = _SECRET_PATTERN.sub("***REDACTED***", message)
+    return True
+
 # -------------------------- 第五步：初始化日志配置（核心方法） --------------------------
 def init_logger():
     """
@@ -55,22 +74,24 @@ def init_logger():
     :return: 配置完成的loguru logger实例
     """
     # 1. 移除loguru默认的控制台输出
-    logger.remove()
+    loguru_logger.remove()
 
     # 2. 配置控制台输出（若.env开启）
     if LOG_CONSOLE_ENABLE:
-        logger.add(
+        loguru_logger.add(
             sink=sys.stdout,
             level=LOG_CONSOLE_LEVEL,
             format=LOG_FORMAT,
             colorize=True,
-            enqueue=True
+            enqueue=True,
+            filter=_redact_record,
+            serialize=settings.log_json,
         )
 
     # 3. 配置文件输出（若.env开启）
     if LOG_FILE_ENABLE:
         LOG_DIR.mkdir(parents=True, exist_ok=True)
-        logger.add(
+        loguru_logger.add(
             sink=LOG_FILE_PATH,
             level=LOG_FILE_LEVEL,
             format=LOG_FORMAT,
@@ -78,11 +99,13 @@ def init_logger():
             retention=LOG_FILE_RETENTION,
             encoding="utf-8",
             enqueue=True,
-            backtrace=True,
-            diagnose=True
+            backtrace=not settings.is_production,
+            diagnose=False,
+            filter=_redact_record,
+            serialize=settings.log_json,
         )
 
-    return logger
+    return loguru_logger
 
 # -------------------------- 第六步：初始化并终极修正全局logger --------------------------
 base_logger = init_logger()

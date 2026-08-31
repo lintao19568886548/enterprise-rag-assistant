@@ -5,8 +5,36 @@ JSON 格式化工具模块
 """
 
 import json
-from typing import Any, Dict
+from typing import Any, Dict, Mapping
 from bson import ObjectId
+from app.core.settings import settings
+
+
+_SENSITIVE_STATE_KEYS = {
+    "answer",
+    "chunks",
+    "content",
+    "embedding_chunks",
+    "history",
+    "hyde_doc",
+    "hyde_embedding_chunks",
+    "original_query",
+    "prompt",
+    "reranked_docs",
+    "rewritten_query",
+    "rrf_chunks",
+    "web_search_docs",
+}
+
+
+def _safe_state_value(key: str, value: Any) -> Any:
+    if key not in _SENSITIVE_STATE_KEYS:
+        return value
+    if value is None:
+        return None
+    if isinstance(value, (str, bytes, list, tuple, dict, set)):
+        return {"redacted": True, "type": type(value).__name__, "length": len(value)}
+    return {"redacted": True, "type": type(value).__name__}
 
 class CustomJSONEncoder(json.JSONEncoder):
     """
@@ -18,7 +46,7 @@ class CustomJSONEncoder(json.JSONEncoder):
         return super().default(obj)
 
 
-def format_state(state: Dict[str, Any], indent: int = 4) -> str:
+def format_state(state: Mapping[str, Any], indent: int = 4) -> str:
     """
     专门用于格式化工作流状态（ImportGraphState）
 
@@ -38,7 +66,10 @@ def format_state(state: Dict[str, Any], indent: int = 4) -> str:
         }
     """
 
-    return json.dumps(state, indent=indent, ensure_ascii=False, cls=CustomJSONEncoder)
+    payload = state if settings.log_sensitive_content else {
+        key: _safe_state_value(key, value) for key, value in state.items()
+    }
+    return json.dumps(payload, indent=indent, ensure_ascii=False, cls=CustomJSONEncoder)
 
 
 def format_json(data: Any, indent: int = 4, ensure_ascii: bool = False) -> str:

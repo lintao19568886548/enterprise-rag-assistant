@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>文件导入服务 | 赛博朋克上传系统</title>
+    <title>企业知识库管理与文件导入</title>
     <style>
         /* 全局样式重置 */
         * {
@@ -50,6 +50,72 @@
             margin-bottom: 30px;
             letter-spacing: 3px;
         }
+        .toolbar {
+            display: flex;
+            gap: 12px;
+            margin-bottom: 20px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+        .toolbar label { color: #00ffff; font-size: .9rem; }
+        .toolbar select, .toolbar input {
+            background: #05051a;
+            color: #00ffcc;
+            border: 1px solid #00ffcc;
+            border-radius: 5px;
+            padding: 8px 10px;
+        }
+        .task-action {
+            background: transparent;
+            color: #ff8ea8;
+            border: 1px solid #ff4068;
+            border-radius: 4px;
+            padding: 5px 10px;
+            cursor: pointer;
+        }
+        .task-action.retry { color: #00ffcc; border-color: #00ffcc; }
+        .task-action[hidden] { display: none; }
+        .manager {
+            margin-bottom: 24px;
+            padding: 18px;
+            border: 1px solid #00a9a0;
+            border-radius: 8px;
+            background: rgba(0, 25, 40, .72);
+        }
+        .manager h2 { color: #00ffff; margin-bottom: 12px; font-size: 1.15rem; }
+        .manager-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+        .manager-actions input {
+            flex: 1 1 220px;
+            min-width: 0;
+            background: #05051a;
+            color: #00ffcc;
+            border: 1px solid #00ffcc;
+            border-radius: 5px;
+            padding: 8px 10px;
+        }
+        .manager-button {
+            background: rgba(0,255,204,.08);
+            color: #00ffcc;
+            border: 1px solid #00ffcc;
+            border-radius: 5px;
+            padding: 8px 12px;
+            cursor: pointer;
+        }
+        .manager-button.danger { color: #ff8ea8; border-color: #ff4068; }
+        .manager-status { min-height: 20px; color: #a8d8d2; font-size: .85rem; margin-bottom: 10px; }
+        .document-list { display: grid; gap: 8px; }
+        .document-row {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) auto auto;
+            align-items: center;
+            gap: 8px;
+            padding: 10px;
+            border: 1px solid rgba(0,255,204,.25);
+            border-radius: 6px;
+        }
+        .document-name { color: #ffff8a; overflow-wrap: anywhere; }
+        .document-meta { color: #89b6bf; font-size: .78rem; margin-top: 4px; }
+        .empty-state { color: #89b6bf; padding: 10px 0; }
 
         /* 上传区域样式 */
         .upload-area {
@@ -293,12 +359,39 @@
                 flex-direction: column;
                 align-items: flex-start;
             }
+            .document-row { grid-template-columns: 1fr 1fr; }
+            .document-row > div:first-child { grid-column: 1 / -1; }
+        }
+        @media (prefers-reduced-motion: reduce) {
+            *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; }
         }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>📡 文件导入服务 📡</h1>
+        <h1>📡 企业知识库管理与导入</h1>
+        <div class="toolbar">
+            <label>知识库
+                <select id="kbSelect">
+                    <option value="00000000-0000-0000-0000-000000000010">默认知识库</option>
+                </select>
+            </label>
+            <label>生产环境 API Key
+                <input id="apiKey" type="password" autocomplete="off" placeholder="开发模式可留空">
+            </label>
+        </div>
+
+        <section class="manager" aria-labelledby="managerTitle">
+            <h2 id="managerTitle">知识库与文档</h2>
+            <div class="manager-actions">
+                <input id="newKbName" maxlength="255" placeholder="新知识库名称" aria-label="新知识库名称">
+                <button class="manager-button" id="createKb" type="button">创建知识库</button>
+                <button class="manager-button" id="refreshDocuments" type="button">刷新文档</button>
+                <button class="manager-button danger" id="deleteKb" type="button">删除当前知识库</button>
+            </div>
+            <div class="manager-status" id="managerStatus" role="status" aria-live="polite"></div>
+            <div class="document-list" id="documentList"></div>
+        </section>
 
         <!-- 上传区域 -->
         <div class="upload-area" id="uploadArea">
@@ -314,15 +407,191 @@
 
     <script>
         // API基础地址（可根据实际情况修改）
-        const API_BASE = 'http://127.0.0.1:8000';
+        const API_BASE = location.protocol.startsWith('http')
+            ? `${location.protocol}//${location.host}`
+            : 'http://127.0.0.1:8000';
 
         // DOM元素
         const uploadArea = document.getElementById('uploadArea');
         const fileInput = document.getElementById('fileInput');
         const fileList = document.getElementById('fileList');
+        const kbSelect = document.getElementById('kbSelect');
+        const apiKeyEl = document.getElementById('apiKey');
+        const newKbNameEl = document.getElementById('newKbName');
+        const createKbBtn = document.getElementById('createKb');
+        const deleteKbBtn = document.getElementById('deleteKb');
+        const refreshDocumentsBtn = document.getElementById('refreshDocuments');
+        const documentListEl = document.getElementById('documentList');
+        const managerStatusEl = document.getElementById('managerStatus');
+        apiKeyEl.value = sessionStorage.getItem('kb_import_api_key') || '';
+        const DEFAULT_KB_ID = '00000000-0000-0000-0000-000000000010';
+
+        function authHeaders() {
+            const key = (apiKeyEl.value || '').trim();
+            return key ? {'X-API-Key': key} : {};
+        }
+
+        async function loadKnowledgeBases() {
+            try {
+                const selected = kbSelect.value || localStorage.getItem('kb_import_knowledge_base_id') || DEFAULT_KB_ID;
+                const response = await fetch(`${API_BASE}/knowledge-bases`, {headers: authHeaders()});
+                if (!response.ok) throw new Error(`知识库加载失败: ${response.status}`);
+                const data = await response.json();
+                kbSelect.textContent = '';
+                for (const kb of (data.items || [])) {
+                    const option = document.createElement('option');
+                    option.value = kb.id;
+                    option.textContent = kb.name || kb.id;
+                    kbSelect.appendChild(option);
+                }
+                if ((data.items || []).some(item => item.id === selected)) kbSelect.value = selected;
+                if (kbSelect.value) localStorage.setItem('kb_import_knowledge_base_id', kbSelect.value);
+                await loadDocuments();
+            } catch (error) {
+                managerStatusEl.textContent = error.message || '知识库加载失败';
+            }
+        }
+
+        function setManagerStatus(message, isError = false) {
+            managerStatusEl.textContent = message || '';
+            managerStatusEl.style.color = isError ? '#ff8ea8' : '#a8d8d2';
+        }
+
+        async function loadDocuments() {
+            const knowledgeBaseId = kbSelect.value;
+            documentListEl.textContent = '';
+            if (!knowledgeBaseId) return;
+            setManagerStatus('正在加载文档…');
+            try {
+                const response = await fetch(
+                    `${API_BASE}/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}/documents`,
+                    {headers: authHeaders()},
+                );
+                const data = await response.json();
+                if (!response.ok) throw new Error(data.message || `文档加载失败: ${response.status}`);
+                const items = Array.isArray(data.items) ? data.items : [];
+                if (!items.length) {
+                    const empty = document.createElement('div');
+                    empty.className = 'empty-state';
+                    empty.textContent = '当前知识库还没有文档，请在下方上传。';
+                    documentListEl.appendChild(empty);
+                }
+                for (const item of items) renderDocument(item);
+                setManagerStatus(`共 ${items.length} 份有效文档`);
+            } catch (error) {
+                setManagerStatus(error.message || '文档加载失败', true);
+            }
+        }
+
+        function renderDocument(item) {
+            const row = document.createElement('div');
+            row.className = 'document-row';
+            const info = document.createElement('div');
+            const name = document.createElement('div');
+            name.className = 'document-name';
+            name.textContent = item.original_filename || item.id;
+            const meta = document.createElement('div');
+            meta.className = 'document-meta';
+            meta.textContent = `状态 ${item.status || 'unknown'} · 版本 ${item.current_version || 1} · ${(Number(item.file_size || 0) / 1024).toFixed(1)} KB`;
+            info.append(name, meta);
+            const rebuild = document.createElement('button');
+            rebuild.className = 'manager-button';
+            rebuild.type = 'button';
+            rebuild.textContent = '重新索引';
+            rebuild.addEventListener('click', () => rebuildDocument(item.id));
+            const remove = document.createElement('button');
+            remove.className = 'manager-button danger';
+            remove.type = 'button';
+            remove.textContent = '删除';
+            remove.addEventListener('click', () => deleteDocument(item.id, item.original_filename));
+            row.append(info, rebuild, remove);
+            documentListEl.appendChild(row);
+        }
+
+        async function createKnowledgeBase() {
+            const name = (newKbNameEl.value || '').trim();
+            if (!name) return setManagerStatus('请输入知识库名称', true);
+            try {
+                const response = await fetch(`${API_BASE}/knowledge-bases`, {
+                    method: 'POST',
+                    headers: {...authHeaders(), 'Content-Type': 'application/json'},
+                    body: JSON.stringify({name, description: '', permission_scope: 'private'}),
+                });
+                const data = await response.json();
+                if (!response.ok) throw new Error(data.message || `创建失败: ${response.status}`);
+                newKbNameEl.value = '';
+                await loadKnowledgeBases();
+                kbSelect.value = data.id;
+                localStorage.setItem('kb_import_knowledge_base_id', data.id);
+                await loadDocuments();
+                setManagerStatus(`知识库“${data.name}”已创建`);
+            } catch (error) {
+                setManagerStatus(error.message || '创建知识库失败', true);
+            }
+        }
+
+        async function deleteKnowledgeBase() {
+            const id = kbSelect.value;
+            const name = kbSelect.options[kbSelect.selectedIndex]?.textContent || id;
+            if (!id || id === DEFAULT_KB_ID) return setManagerStatus('默认知识库受保护，不能删除', true);
+            if (!confirm(`确认删除知识库“${name}”及其文档索引吗？`)) return;
+            try {
+                const response = await fetch(`${API_BASE}/knowledge-bases/${encodeURIComponent(id)}?confirm=true`, {
+                    method: 'DELETE', headers: authHeaders(),
+                });
+                const data = await response.json();
+                if (!response.ok) throw new Error(data.message || `删除失败: ${response.status}`);
+                localStorage.removeItem('kb_import_knowledge_base_id');
+                await loadKnowledgeBases();
+                setManagerStatus('知识库已删除，历史任务默认隐藏');
+            } catch (error) {
+                setManagerStatus(error.message || '删除知识库失败', true);
+            }
+        }
+
+        async function rebuildDocument(documentId) {
+            try {
+                const response = await fetch(`${API_BASE}/documents/${encodeURIComponent(documentId)}/rebuild`, {
+                    method: 'POST', headers: authHeaders(),
+                });
+                const data = await response.json();
+                if (!response.ok) throw new Error(data.message || `重建失败: ${response.status}`);
+                setManagerStatus(`重新索引任务已创建：${data.task_id}`);
+                await loadDocuments();
+            } catch (error) {
+                setManagerStatus(error.message || '重新索引失败', true);
+            }
+        }
+
+        async function deleteDocument(documentId, filename) {
+            if (!confirm(`确认删除文档“${filename || documentId}”及其向量吗？`)) return;
+            try {
+                const response = await fetch(`${API_BASE}/documents/${encodeURIComponent(documentId)}?confirm=true`, {
+                    method: 'DELETE', headers: authHeaders(),
+                });
+                const data = await response.json();
+                if (!response.ok) throw new Error(data.message || `删除失败: ${response.status}`);
+                setManagerStatus('文档已删除');
+                await loadDocuments();
+            } catch (error) {
+                setManagerStatus(error.message || '删除文档失败', true);
+            }
+        }
 
         // 初始化
         function init() {
+            loadKnowledgeBases();
+            apiKeyEl.addEventListener('change', () => {
+                sessionStorage.setItem('kb_import_api_key', (apiKeyEl.value || '').trim());
+                loadKnowledgeBases();
+            });
+            kbSelect.addEventListener('change', () => {
+                localStorage.setItem('kb_import_knowledge_base_id', kbSelect.value);
+                loadDocuments();
+            });
+            createKbBtn.addEventListener('click', createKnowledgeBase);
+            deleteKbBtn.addEventListener('click', deleteKnowledgeBase);
+            refreshDocumentsBtn.addEventListener('click', loadDocuments);
             // 点击上传区域触发文件选择
             uploadArea.addEventListener('click', () => fileInput.click());
 
@@ -388,16 +657,20 @@
             // 文件项HTML结构
             fileItem.innerHTML = `
                 <div class="file-header">
-                    <div class="file-name">${file.name}</div>
-                    <div class="file-size">大小: ${fileSize}</div>
+                    <div class="file-name"></div>
+                    <div class="file-size"></div>
                     <div class="status-badge status-uploading">上传中...</div>
                 </div>
                 <div class="progress-container">
                     <div class="progress-bar" style="width: 0%"></div>
                 </div>
                 <button class="logs-toggle">📜 查看系统日志</button>
+                <button class="task-action cancel" hidden>取消任务</button>
+                <button class="task-action retry" hidden>重试任务</button>
                 <div class="logs-container"></div>
             `;
+            fileItem.querySelector('.file-name').textContent = file.name;
+            fileItem.querySelector('.file-size').textContent = `大小: ${fileSize}`;
 
             // 添加到文件列表
             fileList.appendChild(fileItem);
@@ -411,6 +684,8 @@
                     ? '📜 收起系统日志'
                     : '📜 查看系统日志';
             });
+            fileItem.querySelector('.cancel').addEventListener('click', () => taskAction(fileItem, 'cancel'));
+            fileItem.querySelector('.retry').addEventListener('click', () => taskAction(fileItem, 'retry'));
 
             // 开始上传文件
             uploadFile(file, fileItem);
@@ -426,25 +701,41 @@
                 // 创建FormData
                 const formData = new FormData();
                 formData.append('files', file);
+                formData.append('knowledge_base_id', kbSelect.value);
 
                 // 上传文件
                 const response = await fetch(`${API_BASE}/upload`, {
                     method: 'POST',
                     body: formData,
+                    headers: authHeaders(),
                     // 进度监控
                     signal: AbortSignal.timeout(30000), // 30秒超时
                 });
 
                 if (!response.ok) {
-                    throw new Error(`上传失败: ${response.status} ${response.statusText}`);
+                    let detail = `${response.status} ${response.statusText}`;
+                    try {
+                        const errorBody = await response.json();
+                        detail = `${errorBody.code || response.status}: ${errorBody.message || detail}`;
+                    } catch (_) {}
+                    throw new Error(detail);
                 }
 
                 const result = await response.json();
                 const taskId = result.task_ids?.[0];
 
-                if (!taskId) {
-                    throw new Error('未获取到任务ID');
+                if (!taskId && result.files?.[0]?.duplicate) {
+                    statusBadge.className = 'status-badge status-completed';
+                    statusBadge.textContent = '✅ 内容已存在（未重复导入）';
+                    progressBar.style.width = '100%';
+                    addLog(logsContainer, `内容哈希已存在，文档ID: ${result.files[0].document_id}`, 'done');
+                    return;
                 }
+                if (!taskId) {
+                    throw new Error('服务端未返回任务 ID');
+                }
+                fileItem.dataset.taskId = taskId;
+                fileItem.querySelector('.cancel').hidden = false;
 
                 // 更新状态：上传完成，开始处理
                 statusBadge.className = 'status-badge status-processing';
@@ -470,6 +761,26 @@
             }
         }
 
+        async function taskAction(fileItem, action) {
+            const taskId = fileItem.dataset.taskId;
+            if (!taskId) return;
+            const logs = fileItem.querySelector('.logs-container');
+            try {
+                const response = await fetch(`${API_BASE}/tasks/${taskId}/${action}`, {
+                    method: 'POST',
+                    headers: authHeaders(),
+                });
+                const data = await response.json();
+                if (!response.ok) throw new Error(data.message || `${action} 失败`);
+                addLog(logs, action === 'cancel' ? '已发送取消请求' : '已重新提交失败任务', 'done');
+                fileItem.querySelector('.retry').hidden = true;
+                fileItem.querySelector('.cancel').hidden = action !== 'retry';
+                if (action === 'retry') pollTaskStatus(taskId, fileItem);
+            } catch (error) {
+                addLog(logs, `操作失败: ${error.message}`, 'running');
+            }
+        }
+
         // 轮询任务状态
         async function pollTaskStatus(taskId, fileItem) {
             const progressBar = fileItem.querySelector('.progress-bar');
@@ -479,7 +790,7 @@
             // 轮询函数
             const checkStatus = async () => {
                 try {
-                    const response = await fetch(`${API_BASE}/status/${taskId}`);
+                    const response = await fetch(`${API_BASE}/status/${taskId}`, {headers: authHeaders()});
 
                     if (!response.ok) {
                         throw new Error(`获取状态失败: ${response.status}`);
@@ -487,6 +798,9 @@
 
                     const result = await response.json();
                     const { status, done_list = [], running_list = [] } = result;
+                    if (typeof result.progress === 'number') {
+                        progressBar.style.width = `${Math.max(0, Math.min(100, result.progress))}%`;
+                    }
 
                     // 处理完成日志
                     done_list.forEach(logText => {
@@ -503,19 +817,16 @@
                     // 更新状态和进度
                     switch (status) {
                         case 'processing':
-                            // 进度缓慢增加（30% ~ 90%）
-                            const currentWidth = parseInt(progressBar.style.width);
-                            if (currentWidth < 90) {
-                                const newWidth = Math.min(currentWidth + Math.random() * 5, 90);
-                                progressBar.style.width = `${newWidth}%`;
-                            }
+                            fileItem.querySelector('.cancel').hidden = false;
                             break;
 
                         case 'completed':
                             statusBadge.className = 'status-badge status-completed';
                             statusBadge.textContent = '✅ 任务完成 ✅';
                             progressBar.style.width = '100%';
+                            fileItem.querySelector('.cancel').hidden = true;
                             addLog(logsContainer, '🎉 所有任务处理完成！', 'done');
+                            loadDocuments();
                             return; // 停止轮询
 
                         case 'failed':
@@ -523,7 +834,16 @@
                             statusBadge.textContent = '❌ 任务失败 ❌';
                             progressBar.style.width = '100%';
                             progressBar.style.background = 'linear-gradient(90deg, #ff0000, #cc0000)';
-                            addLog(logsContainer, '❌ 任务处理失败！', 'running');
+                            fileItem.querySelector('.cancel').hidden = true;
+                            fileItem.querySelector('.retry').hidden = false;
+                            addLog(logsContainer, `❌ ${result.error_code || 'IMPORT_FAILED'}: ${result.error_summary || '任务处理失败'}`, 'running');
+                            return;
+
+                        case 'cancelled':
+                            statusBadge.className = 'status-badge status-failed';
+                            statusBadge.textContent = '已取消';
+                            fileItem.querySelector('.cancel').hidden = true;
+                            addLog(logsContainer, '任务已取消', 'running');
                             return; // 停止轮询
 
                         default:

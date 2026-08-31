@@ -1,10 +1,238 @@
-import os
-from pymilvus import MilvusClient, AnnSearchRequest, WeightedRanker, Function, FunctionType
+import threading
+import hashlib
+from datetime import UTC, datetime
+from typing import Any
+
+from pymilvus import AnnSearchRequest, DataType, MilvusClient, WeightedRanker
 from app.conf.milvus_config import milvus_config
 from app.core.logger import logger
 
 # 全局Milvus客户端实例，实现单例复用
 _milvus_client = None
+_milvus_client_lock = threading.Lock()
+_schema_migration_lock = threading.Lock()
+
+
+CHUNK_METADATA_FIELDS: dict[str, tuple[DataType, dict[str, Any]]] = {
+    "tenant_id": (DataType.VARCHAR, {"max_length": 64}),
+    "knowledge_base_id": (DataType.VARCHAR, {"max_length": 64}),
+    "document_id": (DataType.VARCHAR, {"max_length": 64}),
+    "document_version": (DataType.INT64, {}),
+    "file_name": (DataType.VARCHAR, {"max_length": 1024}),
+    "page_number": (DataType.INT64, {}),
+    "section_title": (DataType.VARCHAR, {"max_length": 65535}),
+    "parent_chunk_id": (DataType.VARCHAR, {"max_length": 128}),
+    "chunk_index": (DataType.INT64, {}),
+    "item_aliases": (DataType.JSON, {}),
+    "content_hash": (DataType.VARCHAR, {"max_length": 64}),
+    "parser_version": (DataType.VARCHAR, {"max_length": 64}),
+    "permission_scope": (DataType.VARCHAR, {"max_length": 64}),
+    "created_at": (DataType.VARCHAR, {"max_length": 64}),
+    "is_active": (DataType.BOOL, {}),
+}
+
+ITEM_METADATA_FIELDS: dict[str, tuple[DataType, dict[str, Any]]] = {
+    "tenant_id": (DataType.VARCHAR, {"max_length": 64}),
+    "knowledge_base_id": (DataType.VARCHAR, {"max_length": 64}),
+    "document_id": (DataType.VARCHAR, {"max_length": 64}),
+    "is_active": (DataType.BOOL, {}),
+}
+
+LEGACY_DEFAULT_KNOWLEDGE_BASE_ID = "00000000-0000-0000-0000-000000000010"
+LEGACY_DEFAULT_TENANT_ID = "00000000-0000-0000-0000-000000000100"
+
+
+def _read_all_entities(
+    client: MilvusClient,
+    collection_name: str,
+    output_fields: list[str],
+) -> list[dict[str, Any]]:
+    iterator = client.query_iterator(
+        collection_name=collection_name,
+        batch_size=500,
+        filter="",
+        output_fields=output_fields,
+    )
+    rows: list[dict[str, Any]] = []
+    try:
+        while True:
+            batch = iterator.next()
+            if not batch:
+                return rows
+            rows.extend(dict(item) for item in batch)
+    finally:
+        iterator.close()
+
+
+def _legacy_metadata(row: dict[str, Any], index: int) -> dict[str, Any]:
+    content = str(row.get("content") or "")
+    return {
+        "tenant_id": LEGACY_DEFAULT_TENANT_ID,
+        "knowledge_base_id": LEGACY_DEFAULT_KNOWLEDGE_BASE_ID,
+        "document_id": "",
+        "document_version": 1,
+        "file_name": str(row.get("file_title") or ""),
+        "page_number": None,
+        "section_title": str(row.get("title") or row.get("parent_title") or ""),
+        "parent_chunk_id": None,
+        "chunk_index": index,
+        "item_aliases": [],
+        "content_hash": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+        "parser_version": "legacy",
+        "permission_scope": "private",
+        "created_at": datetime.now(UTC).isoformat(),
+        "is_active": True,
+    }
+
+
+def _rebuild_legacy_collection(
+    client: MilvusClient,
+    collection_name: str,
+) -> str:
+    """Rebuild a fixed-schema collection and retain the renamed original.
+
+    Milvus Lite currently exposes ``add_collection_field`` in the SDK but its
+    server returns UNIMPLEMENTED.  Rename + copy is therefore the only
+    non-lossy migration available locally.  The backup is never deleted here.
+    """
+    description = client.describe_collection(collection_name=collection_name)
+    field_descriptions = list(description.get("fields", []))
+    field_names = [str(field["name"]) for field in field_descriptions]
+    rows = _read_all_entities(client, collection_name, field_names)
+    primary = next((field for field in field_descriptions if field.get("is_primary")), None)
+    primary_name = str(primary["name"]) if primary else ""
+
+    schema = client.create_schema(
+        auto_id=bool(description.get("auto_id")),
+        enable_dynamic_field=True,
+    )
+    for field in field_descriptions:
+        kwargs = dict(field.get("params") or {})
+        if field.get("is_primary"):
+            kwargs.update(
+                is_primary=True,
+                auto_id=bool(field.get("auto_id") or description.get("auto_id")),
+            )
+        schema.add_field(
+            field_name=str(field["name"]),
+            datatype=field["type"],
+            description=str(field.get("description") or ""),
+            **kwargs,
+        )
+
+    index_params = client.prepare_index_params()
+    for index_name in client.list_indexes(collection_name=collection_name):
+        info = client.describe_index(collection_name=collection_name, index_name=index_name)
+        extra_params: dict[str, Any] = {}
+        if str(info.get("index_type")) == "IVF_FLAT":
+            extra_params["params"] = {"nlist": 128}
+        elif str(info.get("index_type")) == "SPARSE_INVERTED_INDEX":
+            extra_params["params"] = {"inverted_index_algo": "DAAT_MAXSCORE"}
+        index_params.add_index(
+            field_name=str(info["field_name"]),
+            index_name=str(info.get("index_name") or index_name),
+            index_type=str(info["index_type"]),
+            metric_type=str(info["metric_type"]),
+            **extra_params,
+        )
+
+    backup_name = f"{collection_name}_legacy_backup_{datetime.now(UTC):%Y%m%d%H%M%S}"
+    client.release_collection(collection_name=collection_name)
+    client.rename_collection(collection_name, backup_name)
+    try:
+        client.create_collection(
+            collection_name=collection_name,
+            schema=schema,
+            index_params=index_params,
+        )
+        for start in range(0, len(rows), 500):
+            migrated: list[dict[str, Any]] = []
+            for offset, original in enumerate(rows[start : start + 500], start=start):
+                row = dict(original)
+                if description.get("auto_id") and primary_name:
+                    row.pop(primary_name, None)
+                for key, value in _legacy_metadata(row, offset).items():
+                    row.setdefault(key, value)
+                migrated.append(row)
+            if migrated:
+                client.insert(collection_name=collection_name, data=migrated)
+        client.load_collection(collection_name=collection_name)
+    except Exception:
+        if client.has_collection(collection_name=collection_name):
+            client.drop_collection(collection_name=collection_name)
+        client.rename_collection(backup_name, collection_name)
+        client.load_collection(collection_name=collection_name)
+        raise
+
+    logger.warning(
+        "Milvus旧集合[{}]已无损迁移，原集合保留为备份[{}]，迁移记录数={}",
+        collection_name,
+        backup_name,
+        len(rows),
+    )
+    return backup_name
+
+
+def ensure_collection_fields(
+    client: MilvusClient,
+    collection_name: str,
+    field_specs: dict[str, tuple[DataType, dict[str, Any]]],
+) -> list[str]:
+    """Add nullable metadata fields to a legacy fixed-schema collection.
+
+    Milvus cannot turn dynamic fields on after collection creation.  Adding
+    nullable scalar fields in place preserves every legacy vector while making
+    knowledge-base/document filters available to newly imported records.
+    """
+    with _schema_migration_lock:
+        description = client.describe_collection(collection_name=collection_name)
+        if description.get("enable_dynamic_field"):
+            return []
+        existing = {str(field.get("name")) for field in description.get("fields", [])}
+        missing = [name for name in field_specs if name not in existing]
+        if not missing:
+            return []
+
+        logger.warning(
+            "Milvus集合[{}]为旧版固定Schema，开始原地补充{}个元数据字段",
+            collection_name,
+            len(missing),
+        )
+        client.release_collection(collection_name=collection_name)
+        added: list[str] = []
+        unsupported_error: Exception | None = None
+        try:
+            for field_name in missing:
+                data_type, kwargs = field_specs[field_name]
+                try:
+                    client.add_collection_field(
+                        collection_name=collection_name,
+                        field_name=field_name,
+                        data_type=data_type,
+                        nullable=True,
+                        **kwargs,
+                    )
+                    added.append(field_name)
+                except Exception as exc:
+                    if "UNIMPLEMENTED" in str(exc).upper() or "METHOD NOT IMPLEMENTED" in str(exc).upper():
+                        unsupported_error = exc
+                        break
+                    # A second worker may have completed the same migration.
+                    refreshed = client.describe_collection(collection_name=collection_name)
+                    refreshed_names = {
+                        str(field.get("name")) for field in refreshed.get("fields", [])
+                    }
+                    if field_name not in refreshed_names:
+                        raise
+            if unsupported_error is None:
+                logger.info("Milvus集合[{}]元数据字段迁移完成：{}", collection_name, added)
+        finally:
+            client.load_collection(collection_name=collection_name)
+        if unsupported_error is not None:
+            backup_name = _rebuild_legacy_collection(client, collection_name)
+            logger.info("Milvus旧Schema兼容迁移已生成备份集合：{}", backup_name)
+            return missing
+        return added
 
 
 def _load_configured_collections(client):
@@ -42,22 +270,22 @@ def get_milvus_client():
         global _milvus_client
         # 单例判断：未初始化则创建新连接
         if _milvus_client is None:
-            milvus_uri = milvus_config.milvus_url
-            # 校验Milvus连接地址配置
-            if not milvus_uri:
-                logger.error("Milvus客户端连接失败：缺少MILVUS_URL环境变量配置")
-                return None
-            # 初始化Milvus客户端
-            grpc_options = {
-                "grpc.keepalive_time_ms": milvus_config.keepalive_time_ms,
-                "grpc.keepalive_timeout_ms": milvus_config.keepalive_timeout_ms,
-                "grpc.keepalive_permit_without_calls": (
-                    milvus_config.keepalive_permit_without_calls
-                ),
-            }
-            _milvus_client = MilvusClient(uri=milvus_uri, grpc_options=grpc_options)
-            _load_configured_collections(_milvus_client)
-            logger.info("Milvus客户端连接成功")
+            with _milvus_client_lock:
+                if _milvus_client is None:
+                    milvus_uri = milvus_config.milvus_url
+                    if not milvus_uri:
+                        logger.error("Milvus客户端连接失败：缺少MILVUS_URL环境变量配置")
+                        return None
+                    grpc_options = {
+                        "grpc.keepalive_time_ms": milvus_config.keepalive_time_ms,
+                        "grpc.keepalive_timeout_ms": milvus_config.keepalive_timeout_ms,
+                        "grpc.keepalive_permit_without_calls": (
+                            milvus_config.keepalive_permit_without_calls
+                        ),
+                    }
+                    _milvus_client = MilvusClient(uri=milvus_uri, grpc_options=grpc_options)
+                    _load_configured_collections(_milvus_client)
+                    logger.info("Milvus客户端连接成功")
         return _milvus_client
     except Exception as e:
         logger.opt(exception=True).error("Milvus客户端连接异常：{}", e)

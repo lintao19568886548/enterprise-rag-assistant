@@ -1,6 +1,7 @@
 from typing import List, Dict, Any
 
 from app.lm.reranker_http_utils import rerank_documents
+from app.core.settings import settings
 from app.query_process.agent.node_base import NodeBase
 from app.core.logger import logger
 from app.query_process.agent.state import QueryGraphState
@@ -42,7 +43,9 @@ class NodeRerank(NodeBase):
         user_query = state.get('rewritten_query', '') or state.get('original_query', '')
 
         # 2. 合并多源文档
-        merged_multi_docs: List[Dict[str, Any]] = self._merge_multi_source_docs(state)
+        merged_multi_docs: List[Dict[str, Any]] = self._merge_multi_source_docs(state)[
+            : settings.rerank_top_n
+        ]
 
         # 3. Rerank 精排(精排打分)
         reranked_docs: List[Dict[str, Any]] = self._rerank_merged_docs(user_query, merged_multi_docs)
@@ -103,13 +106,15 @@ class NodeRerank(NodeBase):
                 continue
 
             format_rrf_doc = {
-                "content": rrf_doc.get('content'),
-                "title": rrf_doc.get('title'),
+                **rrf_doc,
+                "content": str(rrf_doc.get('content') or ""),
+                "title": rrf_doc.get('title') or rrf_doc.get("file_title") or "",
                 "chunk_id": rrf_doc.get('chunk_id'),
                 "url": "",
                 "source": "local"
             }
-            final_docs.append(format_rrf_doc)
+            if format_rrf_doc["content"]:
+                final_docs.append(format_rrf_doc)
 
         # 2. 获取 web 远程的文档
         for web_doc in (state.get('web_search_docs') or []):
@@ -117,13 +122,15 @@ class NodeRerank(NodeBase):
                 continue
 
             format_web_doc = {
+                **web_doc,
                 "content": web_doc.get('snippet'),
                 "title": web_doc.get('title'),
                 "chunk_id": None,
                 "url": web_doc.get('url'),
                 "source": "web"
             }
-            final_docs.append(format_web_doc)
+            if format_web_doc["content"]:
+                final_docs.append(format_web_doc)
 
         logger.info(f"收集到准备进行 Rerank 精排的文档 {len(final_docs)}")
 
@@ -134,9 +141,15 @@ class NodeRerank(NodeBase):
         if not merged_multi_docs:
             return []
 
+        if not settings.rerank_enabled:
+            return [
+                {**doc, "score": doc.get("retrieval_score")}
+                for doc in merged_multi_docs
+            ]
+
         try:
 
-            contents = [doc.get("content") for doc in merged_multi_docs]
+            contents = [str(doc.get("content") or "") for doc in merged_multi_docs]
             # 交叉编码器（精排阶段）
             # Query 和 Document 联合编码，精度更高
             rerank_scores = rerank_documents(user_query, contents)
@@ -164,8 +177,11 @@ class NodeRerank(NodeBase):
             return sorted_score_docs
 
         except Exception as e:
-            logger.error(f"Rerank 重排序失败: {str(e)}")
-            return [{**merged_multi_docs, "score": None}]
+            logger.warning("Rerank 重排序失败，保留召回顺序继续回答：{}", e)
+            return [
+                {**doc, "score": doc.get("retrieval_score")}
+                for doc in merged_multi_docs
+            ]
 
 if __name__ == "__main__":
 

@@ -1,12 +1,16 @@
 from app.clients.milvus_utils import create_hybrid_search_requests, get_milvus_client, hybrid_search
 from app.conf.milvus_config import milvus_config
 from app.core.load_prompt import load_prompt
+from app.core.settings import settings
+from app.core.metrics import RETRIEVAL_RESULTS
 from app.lm.embedding_utils import generate_embeddings
 from app.lm.lm_utils import get_llm_client
 from app.query_process.agent.node_base import NodeBase
 from app.core.logger import logger
 from app.query_process.agent.state import QueryGraphState, create_default_state
 from app.utils.task_utils import add_done_task
+from app.utils.milvus_utils import build_chunk_filter
+from app.query_process.agent.nodes.node_search_embedding import CHUNK_OUTPUT_FIELDS
 
 
 class NodeSearchEmbeddingHyde(NodeBase):
@@ -41,6 +45,10 @@ class NodeSearchEmbeddingHyde(NodeBase):
 
         try:
 
+            if not settings.hyde_enabled:
+                add_done_task(state["session_id"], self.name)
+                return {"hyde_embedding_chunks": [], "hyde_doc": ""}
+
             # 2、生成假设性文档
             hyde_doc = self._step_1_create_hyde_doc(rewritten_query)
 
@@ -49,7 +57,8 @@ class NodeSearchEmbeddingHyde(NodeBase):
                 rewritten_query=rewritten_query,
                 hyde_doc=hyde_doc,
                 item_names=item_names,
-                top_k=5,
+                knowledge_base_id=state.get("knowledge_base_id"),
+                top_k=settings.retrieval_top_k,
             )
 
             # 4、结果封装
@@ -86,8 +95,6 @@ class NodeSearchEmbeddingHyde(NodeBase):
             hyde_doc = response.content
 
             logger.info(f"步骤1: 假设文档生成完成, 长度: {len(hyde_doc)} 字符")
-            logger.debug(f"步骤1: 文档预览: {hyde_doc}")
-
             return hyde_doc
 
         except Exception as e:
@@ -99,11 +106,12 @@ class NodeSearchEmbeddingHyde(NodeBase):
             rewritten_query: str,
             hyde_doc: str,
             item_names=None,
-            req_limit: int = 10,
+            knowledge_base_id: str | None = None,
+            req_limit: int | None = None,
             top_k: int = 5,
             ranker_weights=(0.8, 0.2),  # 调整默认权重以偏向稠密向量 (0.8, 0.2)
             norm_score: bool = True,    # 默认开启归一化
-            output_fields=["chunk_id", "content", "item_name"],
+            output_fields=None,
     ):
         """
         阶段2：利用“重写问题 + 假设性文档”生成 embedding，并到向量库检索切片。
@@ -138,21 +146,24 @@ class NodeSearchEmbeddingHyde(NodeBase):
             collection_name = milvus_config.chunks_collection
             logger.info(f"步骤2: 准备在集合 '{collection_name}' 中执行混合检索")
 
-            # 4、处理 item_names 中的引号，防止注入或语法错误
-            expr = None
-            if item_names:
-                quoted = ", ".join(f'"{v}"' for v in item_names)
-                expr = f"item_name in [{quoted}]"
-                logger.info(f"步骤2: 过滤条件: {expr}")
-            else:
-                logger.info("步骤2: 未指定商品名过滤，将全库检索")
+            # 4、构建安全的商品/知识库过滤表达式。
+            expr = build_chunk_filter(
+                item_names,
+                knowledge_base_id,
+                enforce_knowledge_base=True,
+            )
+            logger.info(
+                "HyDE 检索过滤已构建，商品数量={}，知识库隔离={}",
+                len(item_names or []),
+                True,
+            )
 
             # 5、构造Milvus混合搜索请求对象
             reqs = create_hybrid_search_requests(
                 dense_vector = dense_vec,
                 sparse_vector = sparse_vec,
                 expr = expr,
-                limit = req_limit,
+                limit=req_limit or settings.retrieval_candidate_limit,
             )
 
             # 6、执行混合向量检索
@@ -165,8 +176,9 @@ class NodeSearchEmbeddingHyde(NodeBase):
                 ranker_weights=ranker_weights,
                 norm_score=norm_score,
                 limit=top_k,
-                output_fields=list(output_fields),
+                output_fields=list(output_fields or CHUNK_OUTPUT_FIELDS),
             )
+            RETRIEVAL_RESULTS.labels("hyde").observe(len(res[0]) if res else 0)
 
             return res
 

@@ -6,7 +6,7 @@ from typing import Tuple, Dict, List
 from langchain_core.messages import HumanMessage, SystemMessage
 from pymilvus import DataType
 
-from app.clients.milvus_utils import get_milvus_client
+from app.clients.milvus_utils import ITEM_METADATA_FIELDS, ensure_collection_fields, get_milvus_client
 from app.conf.milvus_config import milvus_config
 from app.core.load_prompt import load_prompt
 from app.core.logger import logger
@@ -212,6 +212,8 @@ class NodeItemNameRecognition(NodeBase):
                 client.create_collection(collection_name=collection_name, schema=schema, index_params=index_params)
                 logger.info(f"Milvus集合[{collection_name}]创建成功，包含Schema和向量索引")
 
+            ensure_collection_fields(client, collection_name, ITEM_METADATA_FIELDS)
+
             # 4、预加载集合到内存，提升删除和后续插入的性能
             # 把 Milvus 集合想象成一本书：
             #     未加载状态 = 书在书架上（节省内存，但无法快速查阅）
@@ -222,7 +224,12 @@ class NodeItemNameRecognition(NodeBase):
             # 5、幂等性处理：删除同名商品数据，避免重复存储
             # 商品名称转义，防止特殊字符导致过滤表达式解析失败
             safe_item_name = escape_milvus_string(value=item_name)
+            knowledge_base_id = str(state.get("knowledge_base_id") or "")
             filter_expr = f'item_name=="{safe_item_name}"'
+            if knowledge_base_id:
+                filter_expr += (
+                    f' and knowledge_base_id=="{escape_milvus_string(knowledge_base_id)}"'
+                )
             client.delete(collection_name=collection_name, filter=filter_expr)
             logger.info(f"Milvus幂等性处理完成，删除集合中的历史数据: {item_name}")
 
@@ -230,6 +237,10 @@ class NodeItemNameRecognition(NodeBase):
             data = {
                 "file_title": file_title,
                 "item_name": item_name,
+                "tenant_id": str(state.get("tenant_id") or ""),
+                "knowledge_base_id": knowledge_base_id,
+                "document_id": str(state.get("document_id") or ""),
+                "is_active": True,
                 "dense_vector": dense_vector,
                 "sparse_vector": sparse_vector
             }

@@ -4,6 +4,7 @@ import json
 from agents.mcp import MCPServerStreamableHttp
 
 from app.conf.bailian_mcp_config import mcp_config
+from app.core.settings import settings
 from app.query_process.agent.node_base import NodeBase
 from app.core.logger import logger
 from app.query_process.agent.state import QueryGraphState, create_default_state
@@ -22,6 +23,9 @@ class NodeWebSearchMcp(NodeBase):
 
         query = state.get("rewritten_query", "")
         docs = []
+        if not settings.web_search_enabled:
+            add_done_task(state["session_id"], self.name)
+            return {"web_search_docs": []}
         # 如果没有查询内容，直接返回
         if query:
             try:
@@ -44,7 +48,7 @@ class NodeWebSearchMcp(NodeBase):
                         continue
                     docs.append({"title": title, "url": url, "snippet": snippet})
 
-                logger.info("MCP 搜索结果:", docs)
+                logger.info("MCP 联网搜索完成，结果数={}", len(docs))
 
         if docs:
             add_done_task(state["session_id"], self.name)

@@ -69,7 +69,15 @@ class NodeMdImg(NodeBase):
         summaries = self._step_3_generate_summaries(md_path_obj.stem, target_images)
 
         # 步骤4：上传图片至MinIO，替换MD图片路径并填充摘要
-        new_md_content = self._step_4_upload_and_replace(md_path_obj.stem, target_images, summaries, md_content)
+        new_md_content = self._step_4_upload_and_replace(
+            state.get("task_id", ""),
+            state.get("tenant_id", ""),
+            state.get("knowledge_base_id", ""),
+            md_path_obj.stem,
+            target_images,
+            summaries,
+            md_content,
+        )
 
 
         # 步骤5：备份并保存新MD文件，更新状态中的文件路径
@@ -97,8 +105,16 @@ class NodeMdImg(NodeBase):
         logger.info(f"已保存处理后的MD文件，新文件是：{new_md_file_name}")
         return new_md_file_name
 
-    def _step_4_upload_and_replace(self, doc_stem: str, target_images: List[Tuple[str, str, Tuple[str, str]]],
-                                   summaries: Dict[str, str], md_content: str) -> str:
+    def _step_4_upload_and_replace(
+        self,
+        task_id: str,
+        tenant_id: str,
+        knowledge_base_id: str,
+        doc_stem: str,
+        target_images: List[Tuple[str, str, Tuple[str, str]]],
+        summaries: Dict[str, str],
+        md_content: str,
+    ) -> str:
         """
         步骤4：清理MinIO旧目录 → 批量上传新图片 → 合并摘要和URL → 替换MD内容并存为新文档
         :param doc_stem: 文档文件名（不含后缀），作为MinIO上传子目录名（按文档隔离）
@@ -115,7 +131,7 @@ class NodeMdImg(NodeBase):
         if minio_client is None:
             logger.info("MinIO未启用，图片将由问答服务的本地 /images 路由提供")
             urls = {
-                image_file: f"http://127.0.0.1:8001/images/{image_file}"
+                image_file: f"http://127.0.0.1:8001/images/{task_id}/{image_file}"
                 for image_file, _, _ in target_images
             }
             image_info = self._merge_summary_and_url(summaries, urls)
@@ -124,7 +140,9 @@ class NodeMdImg(NodeBase):
         # 2、获取MinIO的上传目录
         minio_img_dir = minio_config.minio_img_dir
         # object name
-        upload_dir = f"{minio_img_dir}/{doc_stem}".replace(" ", "")
+        upload_dir = (
+            f"{minio_img_dir}/{tenant_id}/{knowledge_base_id}/{task_id}/{doc_stem}"
+        ).replace(" ", "")
 
         # 步骤1：清理该文档对应的MinIO旧目录
         self._clean_minio_directory(minio_client, upload_dir)
@@ -154,7 +172,7 @@ class NodeMdImg(NodeBase):
         for image_file, (summary, new_url) in image_info.items():
             pattern = re.compile(r"!\[.*?\]\(.*?" + re.escape(image_file) + r".*?\)")
             md_content = pattern.sub(lambda m : f"![{summary}]({new_url})", md_content)
-            logger.info(f"完成图片引用的替换：{image_file} || {new_url} || {summary} ")
+            logger.info("完成一张图片引用替换，摘要长度={}", len(summary))
 
         logger.info(f"MD文件图片引用替换完成，共{len(image_info)}张图片")
         return md_content
@@ -184,7 +202,7 @@ class NodeMdImg(NodeBase):
         """
         try:
 
-            logger.info(f"开始上传图片至MinIO：本地路径：{local_path}，MinIO对象：{object_name}")
+            logger.info("开始上传图片至 MinIO")
 
             # 上传图片至MinIO
             minio_client.fput_object(
@@ -195,14 +213,13 @@ class NodeMdImg(NodeBase):
                 content_type=f"image/{os.path.splitext(local_path)[1][1:]}",
             )
 
-            # http://192.168.100.101:9000/knowledge-base-files/upload-images/hak180产品安全手册/name.jpg
-            protocol  = "https" if minio_config.minio_secure else "http"
-            img_url = f"{protocol}://{minio_config.endpoint}/{minio_config.bucket_name}/{object_name}"
+            from app.clients.minio_utils import minio_object_uri
 
-            logger.info(f"图片上传成功，访问URL：{img_url}")
-            return img_url
+            image_reference = minio_object_uri(minio_config.bucket_name, object_name)
+            logger.info("图片上传成功，已保存内部对象引用")
+            return image_reference
         except Exception as e:
-            logger.error(f"图片上传MinIO失败：{local_path}，错误信息：{str(e)}")
+            logger.error("图片上传 MinIO 失败，error={}", e.__class__.__name__)
             return None
 
     def _upload_images_batch(self, minio_client: Minio, upload_dir: str,
@@ -344,7 +361,7 @@ class NodeMdImg(NodeBase):
 
         # 6、解析模型响应
         summary = response.content.strip().replace("\n", "")
-        logger.info(f"图片摘要生成成功：{image_path}，摘要：{summary}")
+        logger.info("图片摘要生成成功，摘要长度={}", len(summary))
         return summary
 
 

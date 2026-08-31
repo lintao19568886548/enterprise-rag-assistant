@@ -1,100 +1,163 @@
-# 环境配置与依赖导入
+"""Unified model gateway for OpenAI-compatible chat models."""
+
+from __future__ import annotations
+
+import threading
+import time
+from dataclasses import dataclass
+from typing import Any, Iterator
+
 from langchain_openai import ChatOpenAI
-from langchain_core.exceptions import LangChainException
-from typing import Optional
+from prometheus_client import Counter, Histogram
+from pydantic import SecretStr
 
-# 项目内部依赖
-from app.conf.lm_config import lm_config
 from app.core.logger import logger
-
-# 全局缓存：键为(模型名, JSON输出模式)元组，值为ChatOpenAI实例
-# 作用：避免重复初始化客户端，提升性能，统一实例管理
-_llm_client_cache = {}
+from app.core.settings import settings
 
 
-def get_llm_client(model: Optional[str] = None, json_mode: bool = False) -> ChatOpenAI:
-    """
-    获取带全局缓存的LangChain ChatOpenAI客户端实例
-    适配OpenAI/千问/即梦AI等**OpenAI兼容API**，支持自定义模型和JSON标准化输出
-    核心特性：缓存机制+配置统一加载+异常精准捕获+国产模型参数适配
+MODEL_CALLS = Counter(
+    "kb_model_calls_total",
+    "Model gateway calls",
+    ("model", "mode", "status"),
+)
+MODEL_LATENCY = Histogram(
+    "kb_model_call_duration_seconds",
+    "Model gateway latency",
+    ("model", "mode"),
+)
 
-    :param model: 模型名称，优先级：传入参数 > 配置文件lm_config.llm_model > 内置默认qwen3-32b
-    :param json_mode: 是否开启JSON输出模式，开启后返回标准json_object格式（适配结构化数据解析）
-    :return: 初始化完成的ChatOpenAI实例（优先从全局缓存获取，未命中则新建并缓存）
-    :raise ValueError: 缺失API密钥/基础地址等核心配置
-    :raise Exception: 模型初始化失败（LangChain封装层异常）
-    """
-    # 1. 确定目标模型（优先级递减，保证模型名非空）
-    target_model = model or lm_config.llm_model or "qwen3-32b"
-    # 缓存键：模型名+JSON模式，唯一标识不同配置的客户端
-    cache_key = (target_model, json_mode)
 
-    # 2. 缓存命中：直接返回已初始化的实例，避免重复创建
-    if cache_key in _llm_client_cache:
-        logger.debug(f"[LLM客户端] 缓存命中，直接返回实例：模型={target_model}，JSON模式={json_mode}")
-        return _llm_client_cache[cache_key]
+@dataclass
+class _CircuitState:
+    failures: int = 0
+    opened_at: float | None = None
 
-    # 3. 核心配置校验：拦截缺失的API关键配置，提前抛出明确异常
-    if not lm_config.api_key:
-        raise ValueError("[LLM客户端] 配置缺失：请在.env中配置OPENAI_API_KEY（大模型API密钥）")
-    if not lm_config.base_url:
-        raise ValueError("[LLM客户端] 配置缺失：请在.env中配置OPENAI_BASE_URL（API接口基础地址）")
-    logger.info(f"[LLM客户端] 开始初始化新实例：模型={target_model}，JSON模式={json_mode}")
 
-    # 4. 配置参数组装：区分「国产模型私有参数」和「OpenAI通用参数」
-    # extra_body：千问/即梦等国产模型专属私有参数（LangChain透传至API）
-    extra_body = {"enable_thinking": False}  # 千问专属：关闭思考链输出，减少冗余内容
-    # model_kwargs：OpenAI通用参数，所有兼容API均支持
-    model_kwargs = {}
+_client_cache: dict[tuple[str, bool], ChatOpenAI] = {}
+_circuits: dict[str, _CircuitState] = {}
+_lock = threading.RLock()
+
+
+def _get_raw_client(model: str, json_mode: bool) -> ChatOpenAI:
+    cache_key = (model, json_mode)
+    with _lock:
+        cached = _client_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+    api_key = settings.reveal(settings.openai_api_key)
+    if not api_key or not settings.openai_base_url:
+        raise ValueError("OPENAI_API_KEY and OPENAI_BASE_URL are required")
+
+    model_kwargs: dict[str, Any] = {}
     if json_mode:
-        # 开启JSON标准输出模式，强制模型返回可解析的json_object
         model_kwargs["response_format"] = {"type": "json_object"}
-        logger.debug(f"[LLM客户端] 已开启JSON输出模式，模型将返回标准JSON结构")
-
-    # 5. 客户端初始化：捕获LangChain封装层异常，抛出更友好的提示
-    try:
-        llm_client = ChatOpenAI(
-            model=target_model,  # 目标模型名
-            temperature=lm_config.llm_temperature or 0.1,  # 低温度保证输出确定性（0~1）
-            api_key=lm_config.api_key,  # API密钥
-            base_url=lm_config.base_url,  # API基础地址（适配国产模型代理地址）
-            extra_body=extra_body,  # 国产模型私有参数透传
-            model_kwargs=model_kwargs,  # OpenAI通用参数
-        )
-    except LangChainException as e:
-        raise Exception(f"[LLM客户端] 模型【{target_model}】初始化失败（LangChain层）：{str(e)}") from e
-
-    # 6. 新实例存入全局缓存，供后续调用复用
-    _llm_client_cache[cache_key] = llm_client
-    logger.info(f"[LLM客户端] 实例初始化成功并缓存：模型={target_model}，JSON模式={json_mode}")
-
-    return llm_client
+    extra_body = (
+        {"enable_thinking": False}
+        if "dashscope" in settings.openai_base_url.lower()
+        else None
+    )
+    client = ChatOpenAI(
+        model=model,
+        temperature=settings.llm_temperature,
+        api_key=SecretStr(api_key),
+        base_url=settings.openai_base_url,
+        timeout=settings.model_request_timeout_seconds,
+        max_retries=settings.model_max_retries,
+        extra_body=extra_body,
+        model_kwargs=model_kwargs,
+    )
+    with _lock:
+        return _client_cache.setdefault(cache_key, client)
 
 
-# 测试示例：验证客户端创建、缓存机制及日志输出
-if __name__ == "__main__":
-    logger.info("===== 开始执行LLM客户端工具测试 =====")
-    try:
-        # 测试1：默认配置（默认模型+普通模式）
-        client1 = get_llm_client()
-        logger.info("✅ 测试1通过：默认配置客户端创建成功")
-
-        # 测试2：指定多模态模型（qwen-vl-plus）+ 普通模式
-        client2 = get_llm_client(model="qwen-vl-plus")
-        logger.info("✅ 测试2通过：指定多模态模型客户端创建成功")
-
-        # 测试3：同一模型+模式，验证缓存命中
-        client3 = get_llm_client(model="qwen-vl-plus")
-        logger.info(f"✅ 测试3通过：缓存机制验证成功，client2与client3为同一实例：{client2 is client3}")
-
-        # 测试4：开启JSON输出模式
-        client4 = get_llm_client(model="qwen3-32b", json_mode=True)
-        logger.info("✅ 测试4通过：JSON输出模式客户端创建成功")
+def _circuit_allows(model: str) -> bool:
+    with _lock:
+        state = _circuits.setdefault(model, _CircuitState())
+        if state.opened_at is None:
+            return True
+        if time.monotonic() - state.opened_at >= settings.model_circuit_breaker_reset_seconds:
+            state.failures = 0
+            state.opened_at = None
+            return True
+        return False
 
 
-        client1.invoke("请写一个5行5列的表格，表格内容是：1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20")
+def _record_success(model: str) -> None:
+    with _lock:
+        _circuits[model] = _CircuitState()
 
-    except Exception as e:
-        logger.opt(exception=True).error("❌ LLM客户端工具测试失败：{}", e)
-    finally:
-        logger.info("===== LLM客户端工具测试结束 =====")
+
+def _record_failure(model: str) -> None:
+    with _lock:
+        state = _circuits.setdefault(model, _CircuitState())
+        state.failures += 1
+        if state.failures >= settings.model_circuit_breaker_failures:
+            state.opened_at = time.monotonic()
+            logger.warning("模型熔断器已打开，model={}，failures={}", model, state.failures)
+
+
+class ModelGateway:
+    """Small compatibility wrapper exposing the invoke/stream methods used by the graphs."""
+
+    def __init__(self, primary_model: str, json_mode: bool = False) -> None:
+        if primary_model not in settings.allowed_models:
+            raise ValueError(f"model is not in LLM_ALLOWED_MODELS: {primary_model}")
+        self.primary_model = primary_model
+        self.json_mode = json_mode
+        fallbacks = settings.fallback_models if primary_model == settings.llm_model else []
+        self.models = list(dict.fromkeys([primary_model, *fallbacks]))
+        unknown = set(self.models) - settings.allowed_models
+        if unknown:
+            raise ValueError(f"fallback models are not in LLM_ALLOWED_MODELS: {sorted(unknown)}")
+
+    def invoke(self, input_data: Any, **kwargs: Any) -> Any:
+        last_error: Exception | None = None
+        for model in self.models:
+            if not _circuit_allows(model):
+                logger.warning("跳过处于熔断状态的模型，model={}", model)
+                continue
+            started = time.perf_counter()
+            try:
+                response = _get_raw_client(model, self.json_mode).invoke(input_data, **kwargs)
+                _record_success(model)
+                MODEL_CALLS.labels(model, "invoke", "success").inc()
+                return response
+            except Exception as exc:
+                last_error = exc
+                _record_failure(model)
+                MODEL_CALLS.labels(model, "invoke", "error").inc()
+                logger.warning("模型调用失败，model={}，error={}", model, exc.__class__.__name__)
+            finally:
+                MODEL_LATENCY.labels(model, "invoke").observe(time.perf_counter() - started)
+        raise RuntimeError("all configured models are unavailable") from last_error
+
+    def stream(self, input_data: Any, **kwargs: Any) -> Iterator[Any]:
+        last_error: Exception | None = None
+        for model in self.models:
+            if not _circuit_allows(model):
+                continue
+            started = time.perf_counter()
+            emitted = False
+            try:
+                for chunk in _get_raw_client(model, self.json_mode).stream(input_data, **kwargs):
+                    emitted = True
+                    yield chunk
+                _record_success(model)
+                MODEL_CALLS.labels(model, "stream", "success").inc()
+                return
+            except Exception as exc:
+                last_error = exc
+                _record_failure(model)
+                MODEL_CALLS.labels(model, "stream", "error").inc()
+                logger.warning("模型流式调用失败，model={}，error={}", model, exc.__class__.__name__)
+                if emitted:
+                    raise RuntimeError("stream interrupted after partial output") from exc
+            finally:
+                MODEL_LATENCY.labels(model, "stream").observe(time.perf_counter() - started)
+        raise RuntimeError("all configured models are unavailable") from last_error
+
+
+def get_llm_client(model: str | None = None, json_mode: bool = False) -> ModelGateway:
+    """Return a validated gateway without exposing provider secrets."""
+    return ModelGateway(model or settings.llm_model, json_mode=json_mode)

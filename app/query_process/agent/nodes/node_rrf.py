@@ -75,8 +75,11 @@ class NodeRrf(NodeBase):
             entity = doc.get('entity')
             if not entity:
                 continue
-
-            diff_path_result.append(entity)
+            normalized = dict(entity)
+            raw_score = doc.get("distance", doc.get("score"))
+            if raw_score is not None:
+                normalized.setdefault("retrieval_score", float(raw_score))
+            diff_path_result.append(normalized)
 
         return diff_path_result
 
@@ -94,6 +97,8 @@ class NodeRrf(NodeBase):
         for rrf_input, weight in rrf_inputs:
             for rank, doc in enumerate(rrf_input, start=1):
                 chunk_id = doc.get('chunk_id')
+                if chunk_id is None:
+                    continue
                 # RRF 公式: score += weight / (k + rank)
                 chunk_scores[chunk_id] = chunk_scores.get(chunk_id, 0.0) + weight / (k + rank)
 

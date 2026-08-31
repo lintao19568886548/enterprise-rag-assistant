@@ -1,249 +1,488 @@
-import os
-import shutil
+"""FastAPI service for validated document uploads and knowledge-base imports."""
+
+from __future__ import annotations
+
 import uuid
-from typing import List, Dict, Any
+import shutil
+from contextlib import asynccontextmanager
 from datetime import datetime
+from pathlib import Path
+from typing import Any
+
 import uvicorn
-# 第三方库
-from fastapi import FastAPI, UploadFile, File, BackgroundTasks, HTTPException
+from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
-# 项目内部工具/配置/客户端
+
+from app.api.knowledge_router import router as knowledge_router
 from app.clients.minio_utils import get_minio_client
-from app.import_process.agent.kb_import_workflow import KBImportWorkflow
+from app.core.errors import AppError, ErrorCode
+from app.core.health import create_health_router
+from app.core.logger import logger
+from app.core.middleware import install_common_api_features
+from app.core.security import RequireAdmin, RequireReadonly
+from app.core.settings import settings
+from app.import_process.agent.kb_import_workflow import get_default_import_workflow
+from app.import_process.services.import_runner import run_import_graph
+from app.db.repositories import (
+    DEFAULT_KNOWLEDGE_BASE_ID,
+    create_import_task,
+    ensure_defaults,
+    get_document,
+    get_import_task,
+    get_import_task_document,
+    get_latest_import_task_for_document,
+    get_accessible_knowledge_base,
+    get_knowledge_base,
+    register_document,
+    reset_import_task_for_retry,
+    set_document_object_path,
+    update_import_task,
+)
+from app.db.session import init_database
 from app.utils.path_util import PROJECT_ROOT
 from app.utils.task_utils import (
-    add_running_task,
+    TASK_STATUS_COMPLETED,
+    TASK_STATUS_FAILED,
+    TASK_STATUS_PENDING,
+    TASK_STATUS_PROCESSING,
     add_done_task,
+    add_running_task,
+    clear_task,
     get_done_task_list,
     get_running_task_list,
-    update_task_status,
     get_task_status,
+    get_task_result,
+    set_task_result,
+    update_task_status,
 )
-from app.import_process.agent.state import get_default_state
-from app.import_process.agent.main_graph import kb_import_app  # LangGraph全流程编译实例
-from app.core.logger import logger  # 项目统一日志工具
+from app.utils.upload_utils import SavedUpload, save_validated_upload, validate_upload_metadata
 
 
-# 初始化FastAPI应用实例
-# 标题和描述会在Swagger文档(http://ip:port/docs)中展示
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    settings.validate_for_service("import")
+    init_database()
+    ensure_defaults()
+    get_default_import_workflow()
+    logger.info("文件导入服务配置校验通过，环境={}", settings.app_env)
+    yield
+
+
 app = FastAPI(
     title="File Import Service",
-    description="Web service for uploading files to Knowledge Base (PDF/MD → 解析 → 切分 → 向量化 → Milvus/KG入库)"
+    description="PDF/Markdown validation, parsing, chunking, embedding and Milvus import",
+    version="0.2.0",
+    lifespan=lifespan,
 )
-
-# 跨域中间件配置：解决前端调用后端接口的跨域限制
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # 允许所有前端域名访问（生产环境建议指定具体域名）
-    allow_credentials=True,  # 允许携带Cookie等认证信息
-    allow_methods=["*"],  # 允许所有HTTP方法（GET/POST/PUT/DELETE等）
-    allow_headers=["*"],  # 允许所有请求头
+    allow_origins=settings.cors_origins,
+    allow_credentials=settings.cors_allow_credentials,
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+    allow_headers=["Accept", "Authorization", "Content-Type", "X-API-Key", "X-Request-ID"],
 )
+install_common_api_features(app, "import")
+app.include_router(create_health_router("import"))
+app.include_router(knowledge_router)
 
-# --------------------------
-# 静态页面路由：返回文件导入前端页面import.html
-# 访问地址：http://localhost:8000/import.html
-# --------------------------
+
 @app.get("/import.html", response_class=FileResponse)
 async def get_import_page():
-    """返回文件导入前端页面：import.html"""
-    # 拼接HTML文件绝对路径，基于项目根目录定位
-    html_abs_path = PROJECT_ROOT / "app/import_process/page/import.html"
-    # 日志记录页面访问的文件路径，方便排查文件不存在问题
-    logger.info(f"前端页面访问，文件绝对路径：{html_abs_path}")
-
-    # 校验文件是否存在，不存在则抛出404异常
-    if not os.path.exists(html_abs_path):
-        logger.error(f"前端页面文件不存在，路径：{html_abs_path}")
+    html_path = PROJECT_ROOT / "app" / "import_process" / "page" / "import.html"
+    if not html_path.exists():
         raise HTTPException(status_code=404, detail="import.html page not found")
+    return FileResponse(path=html_path, media_type="text/html")
 
-    # 以FileResponse返回HTML文件，浏览器自动渲染
-    return FileResponse(
-        path=html_abs_path,
-        media_type="text/html"  # 显式指定媒体类型为HTML，确保浏览器正确解析
+
+def _upload_to_minio(
+    tenant_id: str,
+    knowledge_base_id: str,
+    task_id: str,
+    saved: SavedUpload,
+) -> str | None:
+    client = get_minio_client()
+    if client is None:
+        return None
+    object_name = (
+        f"{settings.minio_pdf_dir}/{tenant_id}/{knowledge_base_id}/{datetime.now():%Y%m%d}/"
+        f"{task_id}/{saved.stored_filename}"
     )
+    client.fput_object(
+        bucket_name=settings.minio_bucket_name,
+        object_name=object_name,
+        file_path=str(saved.path),
+        content_type=saved.content_type,
+    )
+    return object_name
 
 
-# --------------------------
-# 后台任务：LangGraph全流程执行
-# 独立于主请求线程，由BackgroundTasks触发，避免阻塞接口响应
-# --------------------------
-def run_graph_task(task_id: str, local_dir: str, local_file_path: str):
-    """
-    LangGraph全流程执行后台任务
-    核心流程：初始化状态 → 流式执行图节点 → 实时更新任务状态 → 异常捕获
-    任务状态更新：pending → processing → completed/failed
-    节点进度更新：每完成一个节点，将节点名加入done_list，供前端轮询查看
-
-    :param task_id: 全局唯一任务ID，关联单个文件的全流程处理
-    :param local_dir: 该任务的本地文件存储目录（含临时文件/解析结果）
-    :param local_file_path: 上传文件的本地绝对路径
-    """
-    try:
-        # 1. 更新任务全局状态为：处理中
-        update_task_status(task_id, "processing")
-        logger.info(f"[{task_id}] 开始执行LangGraph全流程，本地文件路径：{local_file_path}")
-
-        # 2. 初始化LangGraph状态：加载默认状态 + 注入当前任务的核心参数
-        init_state = get_default_state()
-        init_state["task_id"] = task_id  # 任务ID关联
-        init_state["local_dir"] = local_dir  # 任务本地目录
-        init_state["local_file_path"] = local_file_path  # 上传文件本地路径
-
-        # 3. 流式执行LangGraph全流程（stream模式：实时获取每个节点的执行结果）
-        for event in KBImportWorkflow.create_and_run(init_state, stream=True):
-        #for event in kb_import_app.stream(init_state):
-            for node_name, node_result in event.items():
-                # 记录每个节点完成的日志，包含任务ID和节点名，方便追踪执行顺序
-                logger.info(f"[{task_id}] LangGraph节点执行完成：{node_name}")
-                # 将完成的节点名加入【已完成列表】，前端轮询/status/{task_id}可实时获取
-                add_done_task(task_id, node_name)
-
-        # 4. 全流程执行完成，更新任务全局状态为：已完成
-        update_task_status(task_id, "completed")
-        logger.info(f"[{task_id}] LangGraph全流程执行完毕，任务完成")
-
-    except Exception as e:
-        # 5. 捕获全流程异常，更新任务全局状态为：失败，并记录错误日志（含堆栈）
-        update_task_status(task_id, "failed")
-        # Loguru 不支持标准库 logging 的 exc_info 参数。异常文本中如果包含
-        # JSON 花括号，使用 f-string + 关键字参数会触发二次格式化并产生 KeyError，
-        # 从而掩盖真正的接口异常（例如 MinerU 的 401 响应）。
-        logger.opt(exception=True).error(
-            "[{}] LangGraph全流程执行失败，异常信息：{}", task_id, e
+@app.post(
+    "/upload",
+    summary="安全上传文件并启动导入",
+    description="支持 PDF/Markdown 多文件上传；服务端执行大小、MIME 和文件签名校验。",
+)
+async def upload_files(
+    background_tasks: BackgroundTasks,
+    principal: RequireAdmin,
+    files: list[UploadFile] = File(...),
+    knowledge_base_id: str = Form(default=DEFAULT_KNOWLEDGE_BASE_ID),
+):
+    if not files:
+        raise AppError(ErrorCode.VALIDATION_ERROR, "至少上传一个文件")
+    if get_accessible_knowledge_base(
+        knowledge_base_id,
+        principal.tenant_id,
+        principal.user_id,
+        is_admin=principal.is_admin,
+        write=True,
+    ) is None:
+        raise AppError(ErrorCode.RESOURCE_NOT_FOUND, "知识库不存在", status_code=404)
+    if len(files) > settings.upload_max_files_per_request:
+        raise AppError(
+            ErrorCode.TOO_MANY_FILES,
+            f"单次最多上传 {settings.upload_max_files_per_request} 个文件",
+            status_code=413,
         )
 
+    for upload in files:
+        validate_upload_metadata(upload)
 
-# --------------------------
-# 核心接口：文件上传接口
-# 支持多文件上传，核心流程：接收文件 → 本地保存 → MinIO上传 → 启动后台任务
-# 访问地址：http://localhost:8000/upload （POST请求，form-data格式传参）
-# --------------------------
-@app.post("/upload", summary="文件上传接口", description="支持多文件批量上传，自动触发知识库导入全流程")
-async def upload_files(background_tasks: BackgroundTasks, files: List[UploadFile] = File(...)):
-    """
-    文件上传核心接口
-    1. 接收前端上传的多文件（PDF/MD为主）
-    2. 按「日期/任务ID」分层保存到本地输出目录，避免文件冲突
-    3. 将文件上传至MinIO对象存储，做持久化保存
-    4. 为每个文件生成唯一TaskID，启动独立的LangGraph后台处理任务
-    5. 实时更新任务状态，供前端轮询监控进度
+    saved_request: list[tuple[str, Path, SavedUpload]] = []
+    try:
+        for upload in files:
+            task_id = str(uuid.uuid4())
+            task_dir = PROJECT_ROOT / "output" / datetime.now().strftime("%Y%m%d") / task_id
+            update_task_status(task_id, TASK_STATUS_PENDING)
+            add_running_task(task_id, "upload_file")
+            saved = await save_validated_upload(upload, task_dir)
+            saved_request.append((task_id, task_dir, saved))
+    except Exception:
+        for task_id, task_dir, saved in saved_request:
+            saved.path.unlink(missing_ok=True)
+            clear_task(task_id)
+            try:
+                task_dir.rmdir()
+            except OSError:
+                pass
+        raise
 
-    :param background_tasks: FastAPI后台任务对象，用于异步执行LangGraph流程
-    :param files: 前端上传的文件列表（form-data格式）
-    :return: 包含上传结果和所有任务ID的JSON响应
-    """
-    # 1. 构建本地存储根目录：项目根目录/output/YYYYMMDD（按日期分层，方便管理）
-    date_based_root_dir = os.path.join(PROJECT_ROOT / "output", datetime.now().strftime("%Y%m%d"))
-    # 初始化任务ID列表，用于返回给前端（一个文件对应一个TaskID）
-    task_ids = []
-
-    # 2. 遍历处理每个上传的文件（多文件批量处理，各自独立生成TaskID）
-    for file in files:
-        # 生成全局唯一TaskID（UUID4），作为单个文件的全流程标识
-        task_id = str(uuid.uuid4())
-        task_ids.append(task_id)
-        logger.info(f"[{task_id}] 开始处理上传文件，文件名：{file.filename}，文件类型：{file.content_type}")
-
-        # 3. 标记「文件上传」阶段为「运行中」，前端轮询可查
-        add_running_task(task_id, "upload_file")
-
-        # 4. 构建该任务的本地独立目录：output/YYYYMMDD/TaskID，避免多文件重名冲突
-        task_local_dir = os.path.join(date_based_root_dir, task_id)
-        os.makedirs(task_local_dir, exist_ok=True)  # 目录不存在则创建，存在则不做处理
-        # 构建上传文件的本地保存绝对路径
-        local_file_abs_path = os.path.join(task_local_dir, file.filename)
-
-        # 5. 将上传的文件保存到本地临时目录（后续MinIO上传/文件解析均基于此文件）
-        with open(local_file_abs_path, "wb") as file_buffer:
-            shutil.copyfileobj(file.file, file_buffer)
-        logger.info(f"[{task_id}] 文件已保存至本地，路径：{local_file_abs_path}")
-
-        # 6. 将本地文件上传至MinIO对象存储，做持久化保存
-        # 从环境变量获取MinIO的PDF存储目录配置
-        minio_pdf_base_dir = os.getenv("MINIO_PDF_DIR", "pdf_files")  # 缺省值：pdf_files
-        # 构建MinIO中的文件对象名：配置目录/YYYYMMDD/文件名（按日期分层，和本地一致）
-        minio_object_name = f"{minio_pdf_base_dir}/{datetime.now().strftime('%Y%m%d')}/{file.filename}"
+    queued: list[tuple[str, Path, SavedUpload, str, int]] = []
+    response_files: list[dict[str, Any]] = []
+    for task_id, task_dir, saved in saved_request:
+        object_name = None
         try:
-            # 获取MinIO客户端实例
-            minio_client = get_minio_client()
-            if minio_client is None:
-                logger.info(f"[{task_id}] MinIO未启用，文件已保存在本地output目录")
-            else:
-                # 从环境变量获取MinIO的桶名配置
-                minio_bucket_name = os.getenv("MINIO_BUCKET_NAME", "kb-import-bucket")  # 缺省值：kb-import-bucket
-
-                # 本地文件上传至MinIO（同名文件会自动覆盖，保证文件最新）
-                minio_client.fput_object(
-                    bucket_name=minio_bucket_name,
-                    object_name=minio_object_name,
-                    file_path=local_file_abs_path,
-                    content_type=file.content_type  # 传递文件原始MIME类型
-                )
-                logger.info(f"[{task_id}] 文件已成功上传至MinIO，桶名：{minio_bucket_name}，对象名：{minio_object_name}")
-        except Exception as e:
-            # MinIO上传失败，记录警告日志（不中断后续流程，本地文件仍可继续处理）
-            logger.opt(exception=True).warning(
-                "[{}] 文件上传MinIO失败，将继续执行本地处理流程，异常信息：{}",
-                task_id,
-                e,
+            document, version, created = register_document(knowledge_base_id, saved, None)
+        except LookupError as exc:
+            raise AppError(ErrorCode.TASK_NOT_FOUND, "知识库不存在", status_code=404) from exc
+        if not created:
+            saved.path.unlink(missing_ok=True)
+            clear_task(task_id)
+            object_name = None
+            try:
+                task_dir.rmdir()
+            except OSError:
+                pass
+            response_files.append(
+                {
+                    "task_id": None,
+                    "document_id": document.id,
+                    "document_version": version.version,
+                    "original_filename": saved.original_filename,
+                    "size": saved.size,
+                    "sha256": saved.sha256,
+                    "duplicate": True,
+                }
             )
-
-        # 7. 标记「文件上传」阶段为「已完成」，前端轮询可查
+            continue
+        try:
+            object_name = _upload_to_minio(
+                principal.tenant_id,
+                knowledge_base_id,
+                task_id,
+                saved,
+            )
+            if object_name:
+                set_document_object_path(document.id, object_name)
+        except Exception as exc:
+            if settings.minio_enabled:
+                logger.opt(exception=True).warning(
+                    "[{}] MinIO 上传失败，保留本地文件继续处理：{}", task_id, exc
+                )
+        create_import_task(
+            task_id,
+            document.id,
+            version.version,
+            local_dir=str(task_dir),
+            local_file_path=str(saved.path),
+        )
         add_done_task(task_id, "upload_file")
+        queued.append((task_id, task_dir, saved, document.id, version.version))
+        logger.info(
+            "[{}] 文件校验并登记成功，原文件名={}，大小={}，sha256={}...，document_id={}",
+            task_id,
+            saved.original_filename,
+            saved.size,
+            saved.sha256[:12],
+            document.id,
+        )
 
-        # 8. 将LangGraph全流程处理加入FastAPI后台任务（异步执行，不阻塞当前接口响应）
-        background_tasks.add_task(run_graph_task, task_id, task_local_dir, local_file_abs_path)
-        logger.info(f"[{task_id}] 已将LangGraph全流程加入后台任务，任务已启动")
+    for task_id, task_dir, saved, document_id, document_version in queued:
+        set_task_result(task_id, "local_dir", str(task_dir))
+        set_task_result(task_id, "local_file_path", str(saved.path))
+        set_task_result(task_id, "sha256", saved.sha256)
+        if settings.task_queue_enabled:
+            from app.worker.tasks import import_document_task
 
-    # 9. 所有文件处理完毕，返回上传成功信息和所有TaskID（前端基于TaskID轮询进度）
-    logger.info(f"多文件上传处理完毕，共处理{len(files)}个文件，生成TaskID列表：{task_ids}")
+            import_document_task.apply_async(
+                args=[task_id, str(task_dir), str(saved.path)],
+                task_id=task_id,
+            )
+        else:
+            background_tasks.add_task(run_import_graph, task_id, str(task_dir), str(saved.path))
+        response_files.append(
+            {
+                "task_id": task_id,
+                "document_id": document_id,
+                "document_version": document_version,
+                "original_filename": saved.original_filename,
+                "stored_filename": saved.stored_filename,
+                "size": saved.size,
+                "sha256": saved.sha256,
+                "duplicate": False,
+            }
+        )
+
     return {
         "code": 200,
-        "message": f"Files uploaded successfully, total: {len(files)}",
-        "task_ids": task_ids
+        "message": f"Files accepted, total: {len(response_files)}",
+        "task_ids": [item["task_id"] for item in response_files if item["task_id"]],
+        "files": response_files,
     }
 
 
-# --------------------------
-# 核心接口：任务状态查询接口
-# 前端轮询此接口获取单个任务的处理进度和状态
-# 访问地址：http://localhost:8000/status/{task_id} （GET请求）
-# --------------------------
-@app.get("/status/{task_id}", summary="任务状态查询", description="根据TaskID查询单个文件的处理进度和全局状态")
-async def get_task_progress(task_id: str):
-    """
-    任务状态查询接口
-    前端轮询此接口（如每秒1次），获取任务的实时处理进度
-    返回数据均来自内存中的任务管理字典（task_utils.py），高性能无IO
-
-    :param task_id: 全局唯一任务ID（由/upload接口返回）
-    :return: 包含任务全局状态、已完成节点、运行中节点的JSON响应
-    """
-    # 构造任务状态返回体
-    task_status_info: Dict[str, Any] = {
+@app.get("/status/{task_id}", summary="任务状态查询")
+async def get_task_progress(task_id: str, principal: RequireReadonly):
+    context = get_import_task_document(task_id)
+    if context is None:
+        raise AppError(ErrorCode.TASK_NOT_FOUND, "任务不存在", status_code=404)
+    task_record, document = context
+    if get_accessible_knowledge_base(
+        document.knowledge_base_id,
+        principal.tenant_id,
+        principal.user_id,
+        is_admin=principal.is_admin,
+    ) is None:
+        raise AppError(ErrorCode.TASK_NOT_FOUND, "任务不存在", status_code=404)
+    status = get_task_status(task_id) or (task_record.status if task_record else None)
+    if not status or task_record is None:
+        raise AppError(ErrorCode.TASK_NOT_FOUND, "任务不存在", status_code=404)
+    return {
         "code": 200,
         "task_id": task_id,
-        "status": get_task_status(task_id),  # 任务全局状态：pending/processing/completed/failed
-        "done_list": get_done_task_list(task_id),  # 已完成的节点/阶段列表
-        "running_list": get_running_task_list(task_id)  # 正在运行的节点/阶段列表
+        "status": status,
+        "done_list": get_done_task_list(task_id),
+        "running_list": get_running_task_list(task_id),
+        "progress": task_record.progress if task_record else None,
+        "current_node": task_record.current_node if task_record else None,
+        "retry_count": task_record.retry_count if task_record else 0,
+        "error_code": task_record.error_code if task_record else None,
+        "error_summary": task_record.error_summary if task_record else None,
     }
-    # 记录状态查询日志，方便追踪前端轮询情况
-    logger.info(
-        f"[{task_id}] 任务状态查询，当前状态：{task_status_info['status']}，已完成节点：{task_status_info['done_list']}")
-    return task_status_info
 
-# --------------------------
-# 服务启动入口
-# 直接运行此脚本即可启动FastAPI服务，无需额外执行uvicorn命令
-# --------------------------
-if __name__ == "__main__":
-    """服务启动入口：本地开发环境直接运行"""
-    logger.info("File Import Service 服务启动中...")
-    # 启动uvicorn服务，绑定本地IP和8000端口，关闭自动重载（生产环境建议用workers多进程）
-    uvicorn.run(
-        app=app,
-        host="127.0.0.1",  # 仅本地访问，生产环境改为0.0.0.0（允许所有IP访问）
-        port=8000  # 服务端口
+
+@app.post("/tasks/{task_id}/cancel", summary="取消导入任务")
+async def cancel_task(task_id: str, principal: RequireAdmin):
+    context = get_import_task_document(task_id)
+    if context is None:
+        raise AppError(ErrorCode.TASK_NOT_FOUND, "任务不存在", status_code=404)
+    task_record, document = context
+    if get_accessible_knowledge_base(
+        document.knowledge_base_id,
+        principal.tenant_id,
+        principal.user_id,
+        is_admin=principal.is_admin,
+        write=True,
+    ) is None:
+        raise AppError(ErrorCode.TASK_NOT_FOUND, "任务不存在", status_code=404)
+    current = get_task_status(task_id) or (task_record.status if task_record else None)
+    if not current or task_record is None:
+        raise AppError(ErrorCode.TASK_NOT_FOUND, "任务不存在", status_code=404)
+    if current in {TASK_STATUS_COMPLETED, TASK_STATUS_FAILED}:
+        return {"task_id": task_id, "status": current, "cancelled": False}
+    from app.utils.task_utils import TASK_STATUS_CANCELLED
+
+    update_task_status(task_id, TASK_STATUS_CANCELLED)
+    update_import_task(task_id, TASK_STATUS_CANCELLED, current_node="cancelled", progress=0)
+    if settings.task_queue_enabled:
+        from app.worker.celery_app import celery_app
+
+        celery_app.control.revoke(task_id, terminate=False)
+    return {"task_id": task_id, "status": TASK_STATUS_CANCELLED, "cancelled": True}
+
+
+@app.post("/tasks/{task_id}/retry", summary="重试失败的导入任务")
+async def retry_task(
+    task_id: str,
+    background_tasks: BackgroundTasks,
+    principal: RequireAdmin,
+):
+    context = get_import_task_document(task_id)
+    if context is None:
+        raise AppError(ErrorCode.TASK_NOT_FOUND, "任务不存在", status_code=404)
+    task_record, task_document = context
+    if get_accessible_knowledge_base(
+        task_document.knowledge_base_id,
+        principal.tenant_id,
+        principal.user_id,
+        is_admin=principal.is_admin,
+        write=True,
+    ) is None:
+        raise AppError(ErrorCode.TASK_NOT_FOUND, "任务不存在", status_code=404)
+    current = get_task_status(task_id) or (task_record.status if task_record else None)
+    if not current or task_record is None:
+        raise AppError(ErrorCode.TASK_NOT_FOUND, "任务不存在", status_code=404)
+    if current not in {TASK_STATUS_FAILED}:
+        raise AppError(ErrorCode.VALIDATION_ERROR, "只有失败任务可以重新执行", status_code=409)
+    local_dir = get_task_result(task_id, "local_dir", "") or task_record.local_dir or ""
+    local_file_path = (
+        get_task_result(task_id, "local_file_path", "") or task_record.local_file_path or ""
     )
+    output_root = (PROJECT_ROOT / "output").resolve()
+    resolved_file = Path(local_file_path).resolve() if local_file_path else None
+    if resolved_file is None or not resolved_file.is_file():
+        document = get_document(task_record.document_id)
+        if document is not None:
+            matches = list(output_root.glob(f"*/{task_id}/{document.stored_filename}"))
+            if matches:
+                resolved_file = matches[0].resolve()
+                local_file_path = str(resolved_file)
+                local_dir = str(resolved_file.parent)
+            elif settings.minio_enabled and document.object_storage_path:
+                client = get_minio_client()
+                if client is not None:
+                    retry_dir = output_root / datetime.now().strftime("%Y%m%d") / task_id
+                    retry_dir.mkdir(parents=True, exist_ok=True)
+                    resolved_file = (retry_dir / document.stored_filename).resolve()
+                    client.fget_object(
+                        settings.minio_bucket_name,
+                        document.object_storage_path,
+                        str(resolved_file),
+                    )
+                    local_file_path = str(resolved_file)
+                    local_dir = str(retry_dir)
+    if (
+        resolved_file is None
+        or not resolved_file.is_file()
+        or output_root not in resolved_file.parents
+    ):
+        raise AppError(ErrorCode.TASK_NOT_FOUND, "任务原文件不存在，无法重试", status_code=410)
+    reset_import_task_for_retry(task_id, local_dir, local_file_path)
+    update_task_status(task_id, TASK_STATUS_PENDING)
+    set_task_result(task_id, "local_dir", local_dir)
+    set_task_result(task_id, "local_file_path", local_file_path)
+    if settings.task_queue_enabled:
+        from app.worker.tasks import import_document_task
+
+        import_document_task.apply_async(
+            args=[task_id, local_dir, local_file_path],
+            task_id=task_id,
+        )
+    else:
+        background_tasks.add_task(run_import_graph, task_id, local_dir, local_file_path)
+    return {"task_id": task_id, "status": TASK_STATUS_PENDING, "retried": True}
+
+
+@app.post("/documents/{document_id}/rebuild", summary="重建文档向量")
+async def rebuild_document(
+    document_id: str,
+    background_tasks: BackgroundTasks,
+    principal: RequireAdmin,
+):
+    document = get_document(document_id)
+    if document is None or document.deleted_at is not None or get_accessible_knowledge_base(
+        document.knowledge_base_id,
+        principal.tenant_id,
+        principal.user_id,
+        is_admin=principal.is_admin,
+        write=True,
+    ) is None:
+        raise AppError(ErrorCode.RESOURCE_NOT_FOUND, "文档不存在", status_code=404)
+    previous_task = get_latest_import_task_for_document(document_id)
+    source = (
+        Path(previous_task.local_file_path).resolve()
+        if previous_task and previous_task.local_file_path
+        else None
+    )
+    output_root = (PROJECT_ROOT / "output").resolve()
+    if (
+        source is None
+        or not source.is_file()
+        or output_root not in source.parents
+    ):
+        source = None
+
+    task_id = str(uuid.uuid4())
+    task_dir = output_root / datetime.now().strftime("%Y%m%d") / task_id
+    task_dir.mkdir(parents=True, exist_ok=False)
+    local_file_path = (task_dir / document.stored_filename).resolve()
+    try:
+        if source is not None:
+            shutil.copy2(source, local_file_path)
+        elif settings.minio_enabled and document.object_storage_path:
+            client = get_minio_client()
+            if client is None:
+                raise RuntimeError("MinIO unavailable")
+            client.fget_object(
+                settings.minio_bucket_name,
+                document.object_storage_path,
+                str(local_file_path),
+            )
+        else:
+            raise AppError(
+                ErrorCode.RESOURCE_NOT_FOUND,
+                "原始文件不存在，无法重建向量",
+                status_code=410,
+            )
+    except Exception:
+        local_file_path.unlink(missing_ok=True)
+        try:
+            task_dir.rmdir()
+        except OSError:
+            pass
+        raise
+
+    create_import_task(
+        task_id,
+        document.id,
+        document.current_version,
+        local_dir=str(task_dir),
+        local_file_path=str(local_file_path),
+    )
+    update_task_status(task_id, TASK_STATUS_PENDING)
+    set_task_result(task_id, "local_dir", str(task_dir))
+    set_task_result(task_id, "local_file_path", str(local_file_path))
+    if settings.task_queue_enabled:
+        from app.worker.tasks import import_document_task
+
+        import_document_task.apply_async(
+            args=[task_id, str(task_dir), str(local_file_path)],
+            task_id=task_id,
+        )
+    else:
+        background_tasks.add_task(
+            run_import_graph,
+            task_id,
+            str(task_dir),
+            str(local_file_path),
+        )
+    return {
+        "task_id": task_id,
+        "document_id": document.id,
+        "document_version": document.current_version,
+        "status": TASK_STATUS_PENDING,
+    }
+
+
+if __name__ == "__main__":
+    uvicorn.run(app=app, host=settings.api_host, port=settings.import_service_port)

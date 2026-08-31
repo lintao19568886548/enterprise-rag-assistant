@@ -1,9 +1,10 @@
 
-from typing import List, TypedDict
 import copy
+from typing import List, TypedDict
+
 from app.core.logger import logger
 
-class QueryGraphState(TypedDict):
+class QueryGraphState(TypedDict, total=False):
     """
     QueryGraphState 定义了整个查询流程中流转的数据结构。
     TypedDict 让我们在代码中能有自动补全和类型检查。
@@ -13,11 +14,15 @@ class QueryGraphState(TypedDict):
     task_id: str          # 任务唯一ID，用于追踪日志
 
     session_id: str  # 会话唯一标识
+    tenant_id: str  # 租户隔离边界
+    user_id: str  # 会话所有者
+    knowledge_base_id: str  # 知识库隔离边界
     original_query: str  # 用户原始问题
 
     # 检索过程中的中间数据
     embedding_chunks: list  # 普通向量检索回来的切片
     hyde_embedding_chunks:list # 已向量化的假设性问题切片
+    hyde_doc: str
     web_search_docs: list  # 网络搜索回来的文档
 
     # 排序过程中的数据
@@ -27,6 +32,12 @@ class QueryGraphState(TypedDict):
     # 生成过程中的数据
     prompt: str  # 组装好的 Prompt
     answer: str  # 最终生成的答案
+    citations: list  # 可核验引用
+    image_urls: list  # 答案关联图片
+    confidence: float  # 基于检索证据的置信度
+    has_sufficient_evidence: bool  # 是否达到生成阈值
+    model: str  # 实际使用的生成模型
+    latency_ms: int  # 生成耗时
 
     # 辅助信息
     item_names: List[str]  # 提取出的商品名称
@@ -39,14 +50,24 @@ class QueryGraphState(TypedDict):
 graph_default_state: QueryGraphState = {
     "task_id":"",
     "session_id": "",
+    "tenant_id": "",
+    "user_id": "",
+    "knowledge_base_id": "",
     "original_query": "",
     "embedding_chunks": [],
     "hyde_embedding_chunks": [],
+    "hyde_doc": "",
     "web_search_docs": [],
     "rrf_chunks": [],
     "reranked_docs": [],
     "prompt": "",
     "answer": "",
+    "citations": [],
+    "image_urls": [],
+    "confidence": 0.0,
+    "has_sufficient_evidence": False,
+    "model": "",
+    "latency_ms": 0,
     "item_names": [],
     "rewritten_query": "",
     "history": [],

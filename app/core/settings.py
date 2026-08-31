@@ -1,0 +1,324 @@
+"""Application settings with validation and backwards-compatible environment aliases."""
+
+from __future__ import annotations
+
+from functools import lru_cache
+from pathlib import Path
+from typing import Literal
+
+from pydantic import AliasChoices, Field, SecretStr, model_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+class Settings(BaseSettings):
+    """Single source of truth for application configuration.
+
+    Secrets use ``SecretStr`` so accidental logging or model dumps redact their
+    values. Legacy variable names remain accepted while the project migrates to
+    the normalized names documented in ``.env.example``.
+    """
+
+    model_config = SettingsConfigDict(
+        env_file=PROJECT_ROOT / ".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="ignore",
+        populate_by_name=True,
+    )
+
+    app_env: Literal["development", "test", "production"] = "development"
+    app_name: str = "Enterprise Knowledge Base"
+    api_host: str = "127.0.0.1"
+    import_service_port: int = Field(default=8000, ge=1, le=65535)
+    query_service_port: int = Field(default=8001, ge=1, le=65535)
+
+    log_level: str = "INFO"
+    log_console_enable: bool = True
+    log_console_level: str = "INFO"
+    log_file_enable: bool = True
+    log_file_level: str = "INFO"
+    log_file_retention: str = "7 days"
+    log_json: bool = False
+    log_sensitive_content: bool = False
+
+    cors_allowed_origins: str = (
+        "http://127.0.0.1:8000,http://127.0.0.1:8001,"
+        "http://localhost:8000,http://localhost:8001"
+    )
+    cors_allow_credentials: bool = False
+
+    auth_enabled: bool = False
+    admin_api_keys: SecretStr | None = None
+    user_api_keys: SecretStr | None = None
+    readonly_api_keys: SecretStr | None = None
+    rate_limit_enabled: bool = True
+    rate_limit_requests: int = Field(default=120, ge=1)
+    rate_limit_window_seconds: int = Field(default=60, ge=1)
+
+    openai_api_key: SecretStr | None = None
+    openai_base_url: str | None = None
+    llm_model: str = Field(
+        default="qwen-plus",
+        validation_alias=AliasChoices("LLM_MODEL", "LLM_DEFAULT_MODEL"),
+    )
+    vl_model: str = "qwen-vl-plus"
+    llm_temperature: float = Field(
+        default=0.1,
+        ge=0.0,
+        le=2.0,
+        validation_alias=AliasChoices("LLM_TEMPERATURE", "LLM_DEFAULT_TEMPERATURE"),
+    )
+    model_request_timeout_seconds: float = Field(default=60.0, gt=0)
+    model_max_retries: int = Field(default=2, ge=0, le=10)
+    model_circuit_breaker_failures: int = Field(default=5, ge=1, le=100)
+    model_circuit_breaker_reset_seconds: int = Field(default=30, ge=1, le=3600)
+    llm_allowed_models: str = ""
+    llm_fallback_models: str = ""
+
+    embedding_model: str = Field(
+        default="BAAI/bge-m3",
+        validation_alias=AliasChoices("EMBEDDING_MODEL", "BGE_M3"),
+    )
+    bge_m3_path: str | None = None
+    bge_device: str = "cpu"
+    bge_fp16: bool = False
+    embedding_dimension: int = Field(
+        default=1024,
+        ge=1,
+        validation_alias=AliasChoices("EMBEDDING_DIMENSION", "EMBEDDING_DIM"),
+    )
+    rerank_model: str = Field(
+        default="gte-rerank-v2",
+        validation_alias=AliasChoices("RERANK_MODEL", "TEXT_RERANK_MODEL"),
+    )
+    rerank_instruct: str = Field(
+        default="",
+        validation_alias=AliasChoices("RERANK_INSTRUCT", "TEXT_RERANK_INSTRUCT"),
+    )
+    rerank_enabled: bool = True
+    rerank_top_n: int = Field(default=30, ge=1, le=200)
+    hyde_enabled: bool = True
+    retrieval_candidate_limit: int = Field(default=10, ge=1, le=200)
+    retrieval_top_k: int = Field(default=5, ge=1, le=50)
+    knowledge_base_filter_enabled: bool = True
+    answer_min_evidence_chunks: int = Field(default=1, ge=1, le=20)
+    answer_min_relevance_score: float = Field(default=0.2, ge=0.0, le=1.0)
+    citation_max_count: int = Field(default=5, ge=1, le=20)
+    answer_context_max_chars: int = Field(default=12000, ge=1000, le=200000)
+
+    redis_enabled: bool = False
+    redis_url: str = "redis://127.0.0.1:6379/0"
+    task_backend: Literal["memory", "redis"] = "memory"
+    task_ttl_seconds: int = Field(default=86400, ge=60)
+    task_queue_enabled: bool = False
+    celery_broker_url: str | None = None
+    celery_result_backend: str | None = None
+    celery_task_max_retries: int = Field(default=3, ge=0, le=20)
+
+    database_enabled: bool = True
+    database_url: str = f"sqlite:///{(PROJECT_ROOT / 'data' / 'knowledge_base.db').as_posix()}"
+    database_pool_size: int = Field(default=10, ge=1, le=100)
+    database_max_overflow: int = Field(default=20, ge=0, le=200)
+    database_pool_timeout_seconds: int = Field(default=30, ge=1, le=300)
+    database_pool_recycle_seconds: int = Field(default=1800, ge=60, le=86400)
+
+    langgraph_checkpointer: Literal["memory", "sqlite", "postgres"] = "sqlite"
+    langgraph_checkpoint_path: str = str(PROJECT_ROOT / "data" / "langgraph_checkpoints.sqlite")
+    langgraph_database_url: str | None = None
+    langgraph_aes_key: SecretStr | None = None
+
+    milvus_uri: str = Field(
+        default="http://127.0.0.1:19530",
+        validation_alias=AliasChoices("MILVUS_URI", "MILVUS_URL"),
+    )
+    milvus_token: SecretStr | None = None
+    milvus_required: bool = True
+    milvus_collection: str = Field(
+        default="chunks_collection",
+        validation_alias=AliasChoices("MILVUS_COLLECTION", "CHUNKS_COLLECTION"),
+    )
+    entity_name_collection: str = "entity_name_collection"
+    item_name_collection: str = "item_name_collection"
+    milvus_metric_type: str = "COSINE"
+    milvus_min_cosine_score: float = Field(default=0.6, ge=-1.0, le=1.0)
+    milvus_keepalive_time_ms: int = Field(default=300000, ge=10000)
+    milvus_keepalive_timeout_ms: int = Field(default=20000, ge=1000)
+    milvus_keepalive_permit_without_calls: bool = False
+
+    minio_enabled: bool = False
+    minio_endpoint: str = "127.0.0.1:9000"
+    minio_public_endpoint: str = "127.0.0.1:9000"
+    minio_access_key: SecretStr | None = None
+    minio_secret_key: SecretStr | None = None
+    minio_bucket_name: str = "kb-import-bucket"
+    minio_img_dir: str = "images"
+    minio_pdf_dir: str = "pdf_files"
+    minio_secure: bool = False
+    minio_public_read: bool = False
+    minio_presigned_expiry_seconds: int = Field(default=3600, ge=60, le=604800)
+
+    mineru_base_url: str | None = None
+    mineru_api_token: SecretStr | None = None
+    mineru_model_source: str = "modelscope"
+
+    web_search_enabled: bool = False
+    mcp_dashscope_base_url: str | None = None
+
+    upload_allowed_extensions: str = ".pdf,.md,.markdown"
+    upload_max_file_size_mb: int = Field(default=50, ge=1, le=1024)
+    upload_max_files_per_request: int = Field(default=10, ge=1, le=100)
+    upload_max_filename_length: int = Field(default=180, ge=16, le=255)
+    upload_chunk_size_bytes: int = Field(default=1024 * 1024, ge=64 * 1024)
+
+    health_dependency_timeout_seconds: float = Field(default=2.0, gt=0, le=30)
+
+    @property
+    def is_production(self) -> bool:
+        return self.app_env == "production"
+
+    @property
+    def cors_origins(self) -> list[str]:
+        return [value.strip() for value in self.cors_allowed_origins.split(",") if value.strip()]
+
+    @property
+    def allowed_upload_extensions(self) -> set[str]:
+        return {
+            value.strip().lower() if value.strip().startswith(".") else f".{value.strip().lower()}"
+            for value in self.upload_allowed_extensions.split(",")
+            if value.strip()
+        }
+
+    @property
+    def upload_max_file_size_bytes(self) -> int:
+        return self.upload_max_file_size_mb * 1024 * 1024
+
+    @property
+    def effective_celery_broker_url(self) -> str:
+        return self.celery_broker_url or self.redis_url
+
+    @property
+    def effective_celery_result_backend(self) -> str:
+        return self.celery_result_backend or self.redis_url
+
+    @property
+    def allowed_models(self) -> set[str]:
+        configured = {
+            value.strip()
+            for value in self.llm_allowed_models.split(",")
+            if value.strip()
+        }
+        return configured or {self.llm_model, self.vl_model, *self.fallback_models}
+
+    @property
+    def fallback_models(self) -> list[str]:
+        return [
+            value.strip()
+            for value in self.llm_fallback_models.split(",")
+            if value.strip()
+        ]
+
+    @staticmethod
+    def reveal(secret: SecretStr | None) -> str | None:
+        return secret.get_secret_value() if secret is not None else None
+
+    def api_keys_for_role(self, role: str) -> set[str]:
+        secret = {
+            "admin": self.admin_api_keys,
+            "user": self.user_api_keys,
+            "readonly": self.readonly_api_keys,
+        }.get(role)
+        raw = self.reveal(secret) or ""
+        return {value.strip() for value in raw.split(",") if value.strip()}
+
+    def validate_for_service(self, service: Literal["import", "query"]) -> None:
+        missing: list[str] = []
+        if not self.openai_api_key:
+            missing.append("OPENAI_API_KEY")
+        if not self.openai_base_url:
+            missing.append("OPENAI_BASE_URL")
+        if not self.milvus_uri:
+            missing.append("MILVUS_URI (or legacy MILVUS_URL)")
+        if service == "import" and not self.mineru_api_token:
+            missing.append("MINERU_API_TOKEN")
+        if self.minio_enabled:
+            if not self.minio_access_key:
+                missing.append("MINIO_ACCESS_KEY")
+            if not self.minio_secret_key:
+                missing.append("MINIO_SECRET_KEY")
+        if self.auth_enabled and not any(
+            (self.admin_api_keys, self.user_api_keys, self.readonly_api_keys)
+        ):
+            missing.append("at least one role API key")
+        if missing:
+            raise ValueError(f"{service} service missing required configuration: {', '.join(missing)}")
+
+    @model_validator(mode="after")
+    def validate_production_safety(self) -> Settings:
+        if self.task_backend == "redis" and not self.redis_enabled:
+            raise ValueError("REDIS_ENABLED must be true when TASK_BACKEND=redis")
+        if self.task_queue_enabled and not self.redis_enabled:
+            raise ValueError("REDIS_ENABLED must be true when TASK_QUEUE_ENABLED=true")
+        if self.langgraph_aes_key:
+            raw_checkpoint_key = self.reveal(self.langgraph_aes_key) or ""
+            key_length = len(raw_checkpoint_key.encode("utf-8"))
+            if key_length not in {16, 24, 32}:
+                raise ValueError("LANGGRAPH_AES_KEY must be 16, 24, or 32 UTF-8 bytes")
+        if self.is_production:
+            if "*" in self.cors_origins:
+                raise ValueError("CORS wildcard is forbidden in production")
+            if not self.auth_enabled:
+                raise ValueError("AUTH_ENABLED must be true in production")
+            role_keys = {
+                role: self.api_keys_for_role(role)
+                for role in ("admin", "user", "readonly")
+            }
+            if any(not keys for keys in role_keys.values()):
+                raise ValueError(
+                    "ADMIN_API_KEYS, USER_API_KEYS, and READONLY_API_KEYS are required "
+                    "in production"
+                )
+            if any(len(key) < 32 for keys in role_keys.values() for key in keys):
+                raise ValueError("Production API keys must be at least 32 characters")
+            key_owners: dict[str, str] = {}
+            for role, keys in role_keys.items():
+                for key in keys:
+                    previous_role = key_owners.setdefault(key, role)
+                    if previous_role != role:
+                        raise ValueError("Production API keys cannot be reused across roles")
+            if self.task_backend == "memory":
+                raise ValueError("TASK_BACKEND=memory is forbidden in production")
+            if not self.redis_enabled:
+                raise ValueError("REDIS_ENABLED must be true in production")
+            if not self.task_queue_enabled:
+                raise ValueError("TASK_QUEUE_ENABLED must be true in production")
+            if not self.database_enabled:
+                raise ValueError("DATABASE_ENABLED must be true in production")
+            if self.database_url.lower().startswith("sqlite"):
+                raise ValueError("SQLite is forbidden in production; use PostgreSQL")
+            if self.langgraph_checkpointer != "postgres":
+                raise ValueError("LANGGRAPH_CHECKPOINTER=postgres is required in production")
+            if not self.langgraph_database_url:
+                raise ValueError("LANGGRAPH_DATABASE_URL is required in production")
+            if not self.langgraph_aes_key:
+                raise ValueError("LANGGRAPH_AES_KEY is required to encrypt production checkpoints")
+            if not self.knowledge_base_filter_enabled:
+                raise ValueError("KNOWLEDGE_BASE_FILTER_ENABLED must be true in production")
+            if not self.llm_allowed_models.strip():
+                raise ValueError("LLM_ALLOWED_MODELS must define an explicit production whitelist")
+            if not self.minio_enabled:
+                raise ValueError("MINIO_ENABLED must be true in production")
+            if not self.minio_access_key or not self.minio_secret_key:
+                raise ValueError("MINIO_ACCESS_KEY and MINIO_SECRET_KEY are required in production")
+            if self.minio_public_read:
+                raise ValueError("MINIO_PUBLIC_READ is forbidden in production")
+        return self
+
+
+@lru_cache(maxsize=1)
+def get_settings() -> Settings:
+    return Settings()
+
+
+settings = get_settings()

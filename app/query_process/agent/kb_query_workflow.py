@@ -1,9 +1,10 @@
-from typing import Optional
+from functools import lru_cache
 
 from dotenv import load_dotenv
 from langgraph.constants import END
 from langgraph.graph import StateGraph
-from app.core.logger import logger
+
+from app.core.checkpointing import checkpoint_config, get_checkpoint_saver
 from app.query_process.agent.nodes.node_answer_output import NodeAnswerOutput
 from app.query_process.agent.nodes.node_item_name_confirm import NodeItemNameConfirm
 from app.query_process.agent.nodes.node_rerank import NodeRerank
@@ -33,7 +34,7 @@ class KBQueryWorkflow:
         # 4. 设置入口和路由规则
         self._setup_routes()
         # 5. 编译工作流（懒加载，首次执行时编译）
-        self._compiled_app: Optional[object] = None
+        self._compiled_app: object | None = None
 
     def _init_nodes(self):
         """初始化所有业务节点（私有方法，封装节点创建逻辑）"""
@@ -118,7 +119,7 @@ class KBQueryWorkflow:
     def compile(self):
         """编译工作流（公开方法，支持手动触发编译）"""
         if not self._compiled_app:
-            self._compiled_app = self.workflow.compile()
+            self._compiled_app = self.workflow.compile(checkpointer=get_checkpoint_saver("query"))
         return self._compiled_app
 
     def run(self, initial_state: QueryGraphState, stream: bool = False) -> QueryGraphState:
@@ -134,10 +135,13 @@ class KBQueryWorkflow:
 
         # self._compiled_app.get_graph().print_ascii()
 
+        thread_id = initial_state.get("session_id") or initial_state.get("task_id")
+        if not thread_id:
+            raise ValueError("Query workflow requires session_id or task_id for checkpointing")
+        config = checkpoint_config(str(thread_id), "query")
         if stream:
-            return self._compiled_app.stream(initial_state)
-        else:
-            return self._compiled_app.invoke(initial_state)
+            return self._compiled_app.stream(initial_state, config=config)
+        return self._compiled_app.invoke(initial_state, config=config)
 
     @classmethod
     def create_and_run(cls, initial_state: QueryGraphState, stream: bool = False) -> QueryGraphState:
@@ -147,8 +151,16 @@ class KBQueryWorkflow:
         :param stream: 是否是流式输出
         :return: 执行完成后的状态对象
         """
-        workflow = cls()
+        workflow = get_default_query_workflow() if cls is KBQueryWorkflow else cls()
         return workflow.run(initial_state, stream)
+
+
+@lru_cache(maxsize=1)
+def get_default_query_workflow() -> KBQueryWorkflow:
+    """Build and compile the stateless graph once per service process."""
+    workflow = KBQueryWorkflow()
+    workflow.compile()
+    return workflow
 
 
 # ===================== 用法示例 =====================
@@ -163,5 +175,5 @@ if __name__ == "__main__":
         is_stream = False
     )
     # 流式输出
-    for chunk in KBQueryWorkflow.create_and_run(initial_state, stream=True):
+    for _chunk in KBQueryWorkflow.create_and_run(initial_state, stream=True):
         pass

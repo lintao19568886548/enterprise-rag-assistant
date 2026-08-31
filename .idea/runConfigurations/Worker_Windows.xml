@@ -1,0 +1,18 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="任务 Worker（Windows/Redis）" type="PythonConfigurationType" factoryName="Python">
+    <module name="knowledge_base_0410" />
+    <option name="ENV_FILES" value="$PROJECT_DIR$/.env" />
+    <option name="PARENT_ENVS" value="true" />
+    <envs>
+      <env name="PYTHONUNBUFFERED" value="1" />
+    </envs>
+    <option name="WORKING_DIRECTORY" value="$PROJECT_DIR$" />
+    <option name="IS_MODULE_SDK" value="true" />
+    <option name="ADD_CONTENT_ROOTS" value="true" />
+    <option name="ADD_SOURCE_ROOTS" value="true" />
+    <option name="SCRIPT_NAME" value="celery" />
+    <option name="PARAMETERS" value="-A app.worker.celery_app:celery_app worker --loglevel=INFO --pool=solo" />
+    <option name="MODULE_MODE" value="true" />
+    <method v="2" />
+  </configuration>
+</component>

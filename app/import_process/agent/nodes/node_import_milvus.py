@@ -3,7 +3,11 @@ from typing import Dict, Any, List
 
 from pymilvus import DataType
 
-from app.clients.milvus_utils import get_milvus_client
+from app.clients.milvus_utils import (
+    CHUNK_METADATA_FIELDS,
+    ensure_collection_fields,
+    get_milvus_client,
+)
 from app.conf.milvus_config import milvus_config
 from app.core.logger import logger
 from app.import_process.agent.node_base import NodeBase
@@ -114,6 +118,24 @@ class NodeImportMilvus(NodeBase):
             client - MilvusClient实例
             chunks_json_data: List[Dict[str, Any]] - 待入库的切片列表
         """
+        document_ids = sorted(
+            {
+                str(chunk.get("document_id", "")).strip()
+                for chunk in chunks_json_data or []
+                if str(chunk.get("document_id", "")).strip()
+            }
+        )
+        if document_ids:
+            for document_id in document_ids:
+                safe_document_id = escape_milvus_string(document_id)
+                client.delete(
+                    collection_name=milvus_config.chunks_collection,
+                    filter=f'document_id == "{safe_document_id}"',
+                )
+                logger.info("已按 document_id={} 清理旧版本切片", document_id)
+            return
+
+        # Legacy records have no document_id; retain the old item-name fallback.
         # 提取并去重item_name，避免重复清理同一商品数据
         item_names = sorted({
             str(x.get("item_name", "")).strip()
@@ -190,6 +212,8 @@ class NodeImportMilvus(NodeBase):
         else:
             logger.info(f"Milvus集合{collection_name}已存在，直接复用")
 
+        ensure_collection_fields(client, collection_name, CHUNK_METADATA_FIELDS)
+
         return client
 
     def _create_collection(self, client, collection_name: str, vector_dimension: int):
@@ -204,7 +228,7 @@ class NodeImportMilvus(NodeBase):
             vector_dimension: int - 稠密向量维度（与向量化模型保持一致）
         """
         # 1. 创建Schema：自增主键+支持动态字段，适配灵活的业务扩展
-        schema = client.create_schema(auto_id=True, enable_dynamic_fields=True)
+        schema = client.create_schema(auto_id=True, enable_dynamic_field=True)
 
         # 2. 新增字段：业务字段+主键+双向量字段，字段类型/长度适配业务场景
         schema.add_field(field_name="chunk_id", datatype=DataType.INT64, is_primary=True, auto_id=True)

@@ -1,184 +1,375 @@
-from pathlib import Path
+"""FastAPI query service for the enterprise knowledge base."""
+
+from __future__ import annotations
+
 import uuid
+from contextlib import asynccontextmanager
+from pathlib import Path
+
 import uvicorn
-from fastapi import FastAPI, BackgroundTasks, HTTPException, Request
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request
+from fastapi.concurrency import run_in_threadpool
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
-from pydantic import BaseModel, Field
-from starlette.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field, field_validator
 
-from app.clients.mongo_history_utils import get_recent_messages, clear_history
-from app.query_process.agent.kb_query_workflow import KBQueryWorkflow
+from app.clients.mongo_history_utils import clear_history, get_recent_messages
+from app.api.knowledge_router import router as knowledge_router
+from app.core.errors import AppError, ErrorCode, classify_exception
+from app.core.health import create_health_router
+from app.core.logger import logger
+from app.core.middleware import install_common_api_features
+from app.core.security import RequireAdmin, RequireReadonly, RequireUser
+from app.core.settings import settings
+from app.db.repositories import (
+    DEFAULT_KNOWLEDGE_BASE_ID,
+    DEFAULT_TENANT_ID,
+    DEFAULT_USER_ID,
+    ensure_chat_session,
+    ensure_defaults,
+    get_accessible_knowledge_base,
+    get_chat_session,
+    get_import_task_document,
+)
+from app.db.session import init_database
+from app.query_process.agent.kb_query_workflow import get_default_query_workflow
 from app.query_process.agent.state import create_default_state
-from app.utils.task_utils import *
-from app.utils.sse_utils import create_sse_queue, SSEEvent, sse_generator
 from app.utils.path_util import PROJECT_ROOT
-
-
-
-# 定义fastapi对象
-app = FastAPI(title="query service",description="掌柜智库查询服务！")
-# 跨域问题解决
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+from app.utils.sse_utils import SSEEvent, create_sse_queue, push_to_session, sse_generator
+from app.utils.task_utils import (
+    TASK_STATUS_COMPLETED,
+    TASK_STATUS_FAILED,
+    TASK_STATUS_PROCESSING,
+    get_task_result,
+    set_task_result,
+    update_task_status,
 )
 
-# 返回chat.html页面
-@app.get("/chat.html")  # 对外访问地址
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    settings.validate_for_service("query")
+    init_database()
+    ensure_defaults()
+    get_default_query_workflow()
+    logger.info("问答服务配置校验及 LangGraph 预编译完成，环境={}", settings.app_env)
+    yield
+
+
+app = FastAPI(
+    title="Query Service",
+    description="Enterprise knowledge-base retrieval and grounded answer service",
+    version="0.2.0",
+    lifespan=lifespan,
+)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_origins,
+    allow_credentials=settings.cors_allow_credentials,
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+    allow_headers=["Accept", "Authorization", "Content-Type", "X-API-Key", "X-Request-ID"],
+)
+install_common_api_features(app, "query")
+app.include_router(create_health_router("query"))
+app.include_router(knowledge_router)
+
+
+@app.get("/chat.html", response_class=FileResponse)
 async def chat():
-    # 从 api -> query_process
-    current_dir_parent_path = Path(__file__).absolute().parent.parent
-    # 定义chat.html位置
-    chat_html_path = current_dir_parent_path / "page" / "chat.html"
-    # 如果不存在，抛出404异常
+    chat_html_path = Path(__file__).resolve().parent.parent / "page" / "chat.html"
     if not chat_html_path.exists():
-        raise HTTPException(status_code=404, detail=f"没有查询到页面，地址为：{chat_html_path}！")
+        raise HTTPException(status_code=404, detail="chat.html page not found")
     return FileResponse(chat_html_path)
 
 
-@app.get("/images/{filename}", response_class=FileResponse)
-async def local_output_image(filename: str):
-    """提供 MinerU 解析后保存在 output 目录中的本地图片。"""
+def _safe_image_name(filename: str) -> str | None:
     safe_name = Path(filename).name
     allowed_suffixes = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"}
     if safe_name != filename or Path(safe_name).suffix.lower() not in allowed_suffixes:
-        raise HTTPException(status_code=404, detail="image not found")
+        return None
+    return safe_name
 
+
+def _principal_can_read_task(task_id: str, principal) -> bool:
+    context = get_import_task_document(task_id)
+    if context is None:
+        return False
+    _task, document = context
+    return get_accessible_knowledge_base(
+        document.knowledge_base_id,
+        principal.tenant_id,
+        principal.user_id,
+        is_admin=principal.is_admin,
+    ) is not None
+
+
+@app.get("/images/{task_id}/{filename}", response_class=FileResponse)
+async def local_output_image_for_task(
+    task_id: str,
+    filename: str,
+    principal: RequireReadonly,
+):
+    safe_name = _safe_image_name(filename)
+    if safe_name is None or not _principal_can_read_task(task_id, principal):
+        raise HTTPException(status_code=404, detail="image not found")
     output_root = PROJECT_ROOT / "output"
-    matches = [path for path in output_root.rglob(safe_name) if path.is_file()]
+    task_roots = [path for path in output_root.glob(f"*/{task_id}") if path.is_dir()]
+    matches = [
+        path
+        for task_root in task_roots
+        for path in task_root.rglob(safe_name)
+        if path.is_file()
+    ]
     if not matches:
         raise HTTPException(status_code=404, detail="image not found")
+    return FileResponse(max(matches, key=lambda path: path.stat().st_mtime))
 
-    # 同名文件存在于多个导入任务时，优先返回最近生成的一份。
-    image_path = max(matches, key=lambda path: path.stat().st_mtime)
-    return FileResponse(image_path)
 
-# 定义接口接收的数据结构
+@app.get("/images/{filename}", response_class=FileResponse)
+async def local_output_image(filename: str, principal: RequireReadonly):
+    """Authenticated compatibility route for image URLs imported before task scoping."""
+    safe_name = _safe_image_name(filename)
+    if safe_name is None:
+        raise HTTPException(status_code=404, detail="image not found")
+    output_root = (PROJECT_ROOT / "output").resolve()
+    matches = sorted(
+        (path for path in output_root.rglob(safe_name) if path.is_file()),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    for match in matches:
+        for parent in match.parents:
+            if parent == output_root:
+                break
+            if _principal_can_read_task(parent.name, principal):
+                return FileResponse(match)
+    raise HTTPException(status_code=404, detail="image not found")
+
+
 class QueryRequest(BaseModel):
-    """查询请求数据结构"""
-    query: str = Field(..., description="查询内容")  # ...必须填写
-    session_id: str = Field(None, description="会话ID")
-    is_stream: bool = Field(False, description="是否流式返回")
+    query: str = Field(..., min_length=1, max_length=4000, description="查询内容")
+    session_id: str | None = Field(default=None, max_length=128, description="会话 ID")
+    knowledge_base_id: str = Field(
+        default=DEFAULT_KNOWLEDGE_BASE_ID,
+        min_length=1,
+        max_length=128,
+        description="知识库 ID",
+    )
+    is_stream: bool = Field(default=False, description="是否流式返回")
+
+    @field_validator("query")
+    @classmethod
+    def query_not_blank(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("query cannot be blank")
+        return value
 
 
 @app.post("/query")
-async def query(background_tasks: BackgroundTasks, request: QueryRequest):
-    """
-    1 解析参数
-    2 更新任务状态
-    3 调用处理流程图
-    4 返回结果
-    :param background_tasks:
-    :param request:
-    :return:
-    """
-    user_query = request.query
-    session_id = request.session_id if request.session_id else str(uuid.uuid4())
-
-    # 处理是不是流式返回结果
-    is_stream = request.is_stream
-    if is_stream:
-        # 创建一个字典 存储对一个session_id : queue 结果队列
+async def query(
+    background_tasks: BackgroundTasks,
+    principal: RequireUser,
+    request: QueryRequest,
+):
+    session_id = request.session_id or str(uuid.uuid4())
+    if get_accessible_knowledge_base(
+        request.knowledge_base_id,
+        principal.tenant_id,
+        principal.user_id,
+        is_admin=principal.is_admin,
+    ) is None:
+        raise AppError(ErrorCode.RESOURCE_NOT_FOUND, "知识库不存在", status_code=404)
+    try:
+        ensure_chat_session(
+            session_id,
+            request.knowledge_base_id,
+            user_id=principal.user_id,
+            tenant_id=principal.tenant_id,
+        )
+    except PermissionError as exc:
+        raise AppError(
+            ErrorCode.PERMISSION_DENIED,
+            "会话不属于当前用户或知识库",
+            status_code=403,
+        ) from exc
+    if request.is_stream:
         create_sse_queue(session_id)
-    # 更新任务状态
-    # 当前会话id作为key! 整体装填处于运行中！
-    update_task_status(session_id, TASK_STATUS_PROCESSING,is_stream)
+    update_task_status(session_id, TASK_STATUS_PROCESSING, request.is_stream)
+    logger.info(
+        "[{}] 开始问答，stream={}，query_length={}",
+        session_id,
+        request.is_stream,
+        len(request.query),
+    )
 
-    print("开始处理流程... 是否流式:", is_stream, f"其他参数:{user_query}, session_id:{session_id}")
-
-    if is_stream:
-        # 如果是流式，则返回一个流式响应，过程不断地推送
-        # 运行执行图对象方法
-        background_tasks.add_task(run_query_graph, session_id,user_query,is_stream)
-        # 返回结果
-        print("开始处理结果....")
+    if request.is_stream:
+        background_tasks.add_task(
+            run_query_graph,
+            session_id,
+            request.query,
+            request.knowledge_base_id,
+            True,
+            principal.user_id,
+            principal.tenant_id,
+        )
         return {
-            "message":"结果正在处理中...",
-            "session_id":session_id
-        }
-    else:
-        # 同步运行
-        run_query_graph(session_id, user_query, is_stream)
-        answer = get_task_result(session_id,"answer","")
-        return {
-            "message":"处理完成！",
-            "session_id":session_id,
-            "answer":answer,
-            "done_list":[]
+            "message": "结果正在处理中",
+            "session_id": session_id,
+            "knowledge_base_id": request.knowledge_base_id,
         }
 
-# 定义查询接口
-def run_query_graph(session_id: str, user_query: str, is_stream: bool = True):
-    print(f"开始流程图处理...{session_id} {user_query} {is_stream}")
+    await run_in_threadpool(
+        run_query_graph,
+        session_id,
+        request.query,
+        request.knowledge_base_id,
+        False,
+        principal.user_id,
+        principal.tenant_id,
+    )
+    task_error = get_task_result(session_id, "error", "")
+    if task_error:
+        try:
+            error_code = ErrorCode(task_error)
+        except ValueError:
+            error_code = ErrorCode.INTERNAL_ERROR
+        status_code = 503 if error_code != ErrorCode.INTERNAL_ERROR else 500
+        raise AppError(error_code, "问答流程执行失败", status_code=status_code)
+    return {
+        "message": "处理完成",
+        "session_id": session_id,
+        "knowledge_base_id": request.knowledge_base_id,
+        "answer": get_task_result(session_id, "answer", ""),
+        "citations": get_task_result(session_id, "citations", []),
+        "image_urls": get_task_result(session_id, "image_urls", []),
+        "confidence": get_task_result(session_id, "confidence", 0.0),
+        "has_sufficient_evidence": get_task_result(
+            session_id,
+            "has_sufficient_evidence",
+            False,
+        ),
+        "model": get_task_result(session_id, "model", ""),
+        "latency_ms": get_task_result(session_id, "latency_ms", 0),
+        "done_list": [],
+    }
 
-    default_state = create_default_state(
+
+def run_query_graph(
+    session_id: str,
+    user_query: str,
+    knowledge_base_id: str = DEFAULT_KNOWLEDGE_BASE_ID,
+    is_stream: bool = True,
+    user_id: str = DEFAULT_USER_ID,
+    tenant_id: str = DEFAULT_TENANT_ID,
+) -> None:
+    state = create_default_state(
         original_query=user_query,
         session_id=session_id,
-        is_stream=is_stream
+        knowledge_base_id=knowledge_base_id,
+        is_stream=is_stream,
+        user_id=user_id,
+        tenant_id=tenant_id,
     )
     try:
-        # 后期运行
-        KBQueryWorkflow.create_and_run(default_state)
-        # 整体任务就更新完了！ 接下来就是数据的更新了！
+        get_default_query_workflow().run(state)
         update_task_status(session_id, TASK_STATUS_COMPLETED, is_stream)
-    except Exception as e:
-        print(f"流程执行异常: {e}")
+    except Exception as exc:
+        error_code = classify_exception(exc)
+        logger.opt(exception=True).error("[{}] 问答工作流失败：{}", session_id, exc)
+        set_task_result(session_id, "error", str(error_code))
         update_task_status(session_id, TASK_STATUS_FAILED, is_stream)
         if is_stream:
-            push_to_session(session_id, SSEEvent.ERROR, {"error": str(e)})
+            push_to_session(
+                session_id,
+                SSEEvent.ERROR,
+                {"code": error_code, "error": "问答流程执行失败"},
+            )
+
 
 @app.get("/stream/{session_id}")
-async def stream(session_id: str, request: Request):
-    print("调用流式/stream...")
-    """
-    sse 实时返回结果
-    """
+async def stream(session_id: str, request: Request, principal: RequireUser):
+    chat_session = get_chat_session(session_id)
+    if (
+        chat_session is None
+        or chat_session.tenant_id != principal.tenant_id
+        or chat_session.user_id != principal.user_id
+    ):
+        raise AppError(ErrorCode.TASK_NOT_FOUND, "会话不存在", status_code=404)
     return StreamingResponse(
         sse_generator(session_id, request),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
-            "X-Accel-Buffering": "no"
-        }
+            "X-Accel-Buffering": "no",
+        },
     )
 
-# 证明服务器启动即可
-@app.get("/health")
-async def health():
-    """
-    检查服务是否正常
-    """
-    return {"ok": True}
+
+@app.get("/health", include_in_schema=False)
+async def legacy_health():
+    return {"ok": True, "deprecated": "use /health/live and /health/ready"}
+
 
 @app.get("/history/{session_id}")
-async def history(session_id: str, limit: int = 50):
-    """
-    查询当前会话历史记录
-    """
+async def history(
+    session_id: str,
+    principal: RequireReadonly,
+    limit: int = Query(default=50, ge=1, le=200),
+):
     try:
-        records = get_recent_messages(session_id, limit=limit)
-        items = []
-        for r in records:
-            items.append({
-                "_id": str(r.get("_id")) if r.get("_id") is not None else "",
-                "session_id": r.get("session_id", ""),
-                "role": r.get("role", ""),
-                "text": r.get("text", ""),
-                "rewritten_query": r.get("rewritten_query", ""),
-                "item_names": r.get("item_names", []),
-                "ts": r.get("ts")
-            })
-        return {"session_id": session_id, "items": items}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"history error: {e}")
+        chat_session = get_chat_session(session_id)
+        if (
+            chat_session is None
+            or chat_session.tenant_id != principal.tenant_id
+            or chat_session.user_id != principal.user_id
+        ):
+            raise AppError(ErrorCode.TASK_NOT_FOUND, "会话不存在", status_code=404)
+        records = get_recent_messages(
+            session_id,
+            limit=limit,
+            tenant_id=principal.tenant_id,
+            user_id=principal.user_id,
+        )
+        return {
+            "session_id": session_id,
+            "items": [
+                {
+                    "_id": str(record.get("_id")) if record.get("_id") is not None else "",
+                    "session_id": record.get("session_id", ""),
+                    "role": record.get("role", ""),
+                    "text": record.get("text", ""),
+                    "rewritten_query": record.get("rewritten_query", ""),
+                    "item_names": record.get("item_names", []),
+                    "image_urls": record.get("image_urls", []),
+                    "citations": record.get("citations", []),
+                    "model": record.get("model"),
+                    "latency_ms": record.get("latency_ms"),
+                    "ts": record.get("ts"),
+                }
+                for record in records
+            ],
+        }
+    except AppError:
+        raise
+    except Exception as exc:
+        logger.opt(exception=True).error("[{}] 历史记录读取失败：{}", session_id, exc)
+        raise AppError(ErrorCode.INTERNAL_ERROR, "历史记录读取失败", status_code=503) from exc
+
 
 @app.delete("/history/{session_id}")
-async def clear_chat_history(session_id: str):
-    count =  clear_history(session_id)
+async def clear_chat_history(session_id: str, principal: RequireAdmin):
+    try:
+        count = clear_history(
+            session_id,
+            tenant_id=principal.tenant_id,
+            user_id=principal.user_id,
+        )
+    except PermissionError as exc:
+        raise AppError(ErrorCode.TASK_NOT_FOUND, "会话不存在", status_code=404) from exc
     return {"message": "History cleared", "deleted_count": count}
 
+
 if __name__ == "__main__":
-    uvicorn.run(app, host="127.0.0.1", port=8001)
+    uvicorn.run(app, host=settings.api_host, port=settings.query_service_port)

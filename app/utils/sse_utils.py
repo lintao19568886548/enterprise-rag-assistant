@@ -1,105 +1,150 @@
+"""SSE transport using an in-process queue or Redis Streams."""
+
+from __future__ import annotations
+
+import asyncio
 import json
 import queue
-import asyncio
-from typing import Dict, Any, Optional, AsyncGenerator
+import threading
+from typing import Any, AsyncGenerator
+
 from fastapi import Request
+
+from app.clients.redis_utils import get_async_redis_client, get_redis_client
+from app.core.logger import logger
+from app.core.settings import settings
 
 
 class SSEEvent:
-    READY = "ready"         # 连接建立
-    PROGRESS = "progress"   # 任务节点进度
-    DELTA = "delta"         # LLM 流式输出增量
-    FINAL = "final"         # 最终完整答案
-    ERROR = "error"         # 错误信息
-    CLOSE = "__close__"     # 关闭连接信号
+    READY = "ready"
+    PROGRESS = "progress"
+    DELTA = "delta"
+    FINAL = "final"
+    ERROR = "error"
+    CLOSE = "__close__"
 
 
-# 全局 SSE 会话队列存储
-# Key: session_id, Value: queue.Queue
-_session_stream: Dict[str, queue.Queue] = {}
+_session_stream: dict[str, queue.Queue] = {}
+_session_lock = threading.RLock()
 
-def get_sse_queue(session_id: str) -> Optional["queue.Queue"]:
-    """获取指定 session 的队列"""
-    return _session_stream.get(session_id)
 
-def create_sse_queue(session_id: str) -> "queue.Queue":
-    """创建并注册一个新的 SSE 队列"""
-    print(f"[SSE] Creating queue for session: {session_id}")
-    q = queue.Queue()
-    _session_stream[session_id] = q
-    return q
+def _uses_redis() -> bool:
+    return settings.task_backend == "redis"
 
-def remove_sse_queue(session_id: str):
-    """移除指定 session 的队列"""
-    print(f"[SSE] Removing queue for session: {session_id}")
-    _session_stream.pop(session_id, None)
 
-def _sse_pack(event: str, data: Dict[str, Any]) -> str:
-    """打包 SSE 消息格式"""
-    payload = json.dumps(data, ensure_ascii=False)
-    # print(f"[SSE] Packing event: {event}, payload: {payload[:50]}...")
+def _redis_stream_key(session_id: str) -> str:
+    return f"kb:sse:{session_id}"
+
+
+def get_sse_queue(session_id: str) -> queue.Queue | None:
+    with _session_lock:
+        return _session_stream.get(session_id)
+
+
+def create_sse_queue(session_id: str):
+    if _uses_redis():
+        client = get_redis_client()
+        key = _redis_stream_key(session_id)
+        with client.pipeline(transaction=True) as pipe:
+            pipe.delete(key)
+            pipe.xadd(key, {"event": "__init__", "data": "{}"})
+            pipe.expire(key, settings.task_ttl_seconds)
+            pipe.execute()
+        return key
+    with _session_lock:
+        stream_queue: queue.Queue = queue.Queue()
+        _session_stream[session_id] = stream_queue
+        return stream_queue
+
+
+def remove_sse_queue(session_id: str) -> None:
+    if _uses_redis():
+        # Keep the stream for reconnect/resume and let the configured TTL remove it.
+        get_redis_client().expire(_redis_stream_key(session_id), settings.task_ttl_seconds)
+        return
+    with _session_lock:
+        _session_stream.pop(session_id, None)
+
+
+def _sse_pack(event: str, data: dict[str, Any]) -> str:
+    payload = json.dumps(data, ensure_ascii=False, default=str)
     return f"event: {event}\ndata: {payload}\n\n"
 
-def push_to_session(session_id: str, event: str, data: Dict[str, Any]):
-    """
-    通过 session_id 推送事件
-    """
-    stream_queue = get_sse_queue(session_id)
-    if stream_queue:
-        # print(f"[SSE] Pushing to session {session_id}: {event}")
-        stream_queue.put({"event": event, "data": data})
-    else:
-        print(f"[SSE] Warning: No queue found for session {session_id} when pushing {event}")
 
-async def sse_generator(session_id: str, request: Request):
-    """
-    SSE 生成器，用于 FastAPI 的 StreamingResponse
-    """
-    print(f"[SSE] Generator started for session: {session_id}")
+def push_to_session(session_id: str, event: str, data: dict[str, Any]) -> None:
+    if _uses_redis():
+        client = get_redis_client()
+        key = _redis_stream_key(session_id)
+        with client.pipeline(transaction=True) as pipe:
+            pipe.xadd(
+                key,
+                {"event": event, "data": json.dumps(data, ensure_ascii=False, default=str)},
+                maxlen=1000,
+                approximate=True,
+            )
+            pipe.expire(key, settings.task_ttl_seconds)
+            pipe.execute()
+        return
     stream_queue = get_sse_queue(session_id)
     if stream_queue is None:
-        # 如果没有对应的队列，直接结束
-        print(f"[SSE] Error: Queue not found for session {session_id}. Available sessions: {list(_session_stream.keys())}")
+        logger.warning("[{}] SSE 会话不存在，丢弃事件 {}", session_id, event)
         return
+    stream_queue.put({"event": event, "data": data})
 
-    loop = asyncio.get_running_loop()
+
+async def _memory_messages(session_id: str) -> AsyncGenerator[dict[str, Any], None]:
+    stream_queue = get_sse_queue(session_id)
+    if stream_queue is None:
+        return
+    while True:
+        try:
+            yield await asyncio.to_thread(stream_queue.get, True, 1.0)
+        except queue.Empty:
+            yield {"event": "__heartbeat__", "data": {}}
+
+
+async def _redis_messages(session_id: str) -> AsyncGenerator[dict[str, Any], None]:
+    client = get_async_redis_client()
+    key = _redis_stream_key(session_id)
+    last_id = "0-0"
+    while True:
+        messages = await client.xread({key: last_id}, count=50, block=1000)
+        if not messages:
+            yield {"event": "__heartbeat__", "data": {}}
+            continue
+        for _, entries in messages:
+            for message_id, fields in entries:
+                last_id = message_id
+                event = fields.get("event", "message")
+                if event == "__init__":
+                    continue
+                try:
+                    data = json.loads(fields.get("data", "{}"))
+                except json.JSONDecodeError:
+                    data = {"message": "invalid SSE payload"}
+                yield {"event": event, "data": data}
+
+
+async def sse_generator(session_id: str, request: Request):
+    yield _sse_pack(SSEEvent.READY, {})
+    source = _redis_messages(session_id) if _uses_redis() else _memory_messages(session_id)
     try:
-        # 发送连接建立信号
-        print(f"[SSE] Sending ready signal for {session_id}")
-        yield _sse_pack("ready", {})
-
-        while True:
-            # 若客户端断开，尽快退出
+        async for message in source:
             if await request.is_disconnected():
-                print(f"[SSE] Client disconnected: {session_id}")
-                print("-----------------------断开连接--------------------")
                 break
-
-            try:
-                # 使用 run_in_executor 避免阻塞 async 事件循环
-                msg = await loop.run_in_executor(None, stream_queue.get, True, 1.0)
-            except queue.Empty:
-                # print(f"[SSE] Queue empty for {session_id}, waiting...")
+            event = str(message.get("event") or "message")
+            if event == "__heartbeat__":
+                yield ": heartbeat\n\n"
                 continue
-
-            event = msg.get("event")
-            data = msg.get("data")
-            
-            # print(f"[SSE] Yielding event {event} for {session_id}")
-
-            # 特殊关闭事件
-            if event == "__close__":
-                print(f"[SSE] Closing signal received for {session_id}")
+            if event == SSEEvent.CLOSE:
                 break
-
-            yield _sse_pack(event, data)
+            yield _sse_pack(event, message.get("data") or {})
+            if event in {SSEEvent.FINAL, SSEEvent.ERROR}:
+                break
     except (asyncio.CancelledError, ConnectionResetError, BrokenPipeError):
-        print(f"[SSE] Client disconnected (Cancelled/Reset/Pipe): {session_id}")
-        # 生成器被取消/对端断开：静默退出
         return
-    except Exception as e:
-        print(f"[SSE] Exception in generator for {session_id}: {e}")
+    except Exception as exc:
+        logger.opt(exception=True).error("[{}] SSE 流异常：{}", session_id, exc)
+        yield _sse_pack(SSEEvent.ERROR, {"error": "SSE stream unavailable"})
     finally:
-        print(f"[SSE] Generator finished for {session_id}")
-        # 清理资源
         remove_sse_queue(session_id)

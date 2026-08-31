@@ -1,5 +1,7 @@
 import json
+import hashlib
 import re
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Tuple, List, Dict
 
@@ -14,6 +16,46 @@ from app.import_process.agent.state import ImportGraphState, create_default_stat
 DEFAULT_MAX_CONTENT_LENGTH = 2000
 # 短Chunk合并阈值：同父标题的短Chunk会被合并，减少碎片化
 MIN_CONTENT_LENGTH = 500
+
+
+def _normalize_page_match_text(value: str) -> str:
+    value = re.sub(r"<[^>]+>", "", value)
+    return re.sub(r"[\s`#*_>|-]+", "", value).lower()
+
+
+def infer_page_number(content: str, page_entries: list[tuple[int, str]]) -> int | None:
+    """Infer a physical PDF page from MinerU content-list text blocks."""
+    normalized_content = _normalize_page_match_text(content)
+    scores: dict[int, int] = {}
+    for page_number, text in page_entries:
+        normalized_text = _normalize_page_match_text(text)
+        if len(normalized_text) < 6 or normalized_text not in normalized_content:
+            continue
+        scores[page_number] = scores.get(page_number, 0) + len(normalized_text)
+    if not scores:
+        return None
+    return max(scores, key=lambda page: (scores[page], -page))
+
+
+def load_mineru_page_entries(md_path: str) -> list[tuple[int, str]]:
+    """Load the compact MinerU content list without persisting full parser state."""
+    md_dir = Path(md_path).parent
+    content_lists = sorted(md_dir.glob("*_content_list.json"))
+    if not content_lists:
+        return []
+    try:
+        payload = json.loads(content_lists[0].read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning("MinerU页码索引读取失败，引用将不包含页码：{}", exc)
+        return []
+    entries: list[tuple[int, str]] = []
+    for item in payload if isinstance(payload, list) else []:
+        if not isinstance(item, dict) or not isinstance(item.get("page_idx"), int):
+            continue
+        text = str(item.get("text") or "").strip()
+        if text:
+            entries.append((int(item["page_idx"]) + 1, text))
+    return entries
 
 class NodeDocumentSplit(NodeBase):
 
@@ -64,6 +106,33 @@ class NodeDocumentSplit(NodeBase):
         # 额外处理：对所有Chunk做parent_title兜底，适配Milvus向量库必填字段要求
         # 输出：长度适中、语义完整、低碎片化的最终Chunk列表（可直接用于向量入库/大模型调用）
         sections = self._step_4_refine_chunks(sections)
+
+        # Attach stable lifecycle metadata before embedding/Milvus insertion.
+        created_at = datetime.now(UTC).isoformat()
+        page_entries = load_mineru_page_entries(str(state.get("md_path") or ""))
+        for index, section in enumerate(sections):
+            content_value = str(section.get("content", ""))
+            section_title = str(section.get("title") or section.get("parent_title") or "")
+            page_number = section.get("page_number") or infer_page_number(content_value, page_entries)
+            section.update(
+                {
+                    "tenant_id": state.get("tenant_id", ""),
+                    "knowledge_base_id": state.get("knowledge_base_id", ""),
+                    "document_id": state.get("document_id", ""),
+                    "document_version": state.get("document_version", 1),
+                    "file_name": state.get("original_filename") or file_title,
+                    "section_title": section_title,
+                    "parent_chunk_id": section.get("parent_chunk_id"),
+                    "permission_scope": state.get("permission_scope", "private"),
+                    "is_active": True,
+                    "chunk_index": index,
+                    "item_aliases": list(section.get("item_aliases") or []),
+                    "page_number": page_number,
+                    "parser_version": "mineru-v4",
+                    "content_hash": hashlib.sha256(content_value.encode("utf-8")).hexdigest(),
+                    "created_at": created_at,
+                }
+            )
 
         # ===================================== 步骤5：输出文档切分统计信息 =====================================
         # 作用：打印核心统计数据，便于监控切分效果、调试问题（原始行数/最终Chunk数/首个Chunk预览）

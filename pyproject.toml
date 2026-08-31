@@ -1,18 +1,24 @@
 [project]
 name = "knowledge-base"
 version = "0.1.0"
-description = "Add your description here"
-requires-python = ">=3.11"
+description = "Enterprise knowledge-base RAG service built with FastAPI, LangGraph and Milvus"
+requires-python = ">=3.11,<3.12"
 dependencies = [
+    "aiofiles>=24.1.0,<26.0.0",
+    "alembic>=1.16.0,<2.0.0",
+    "celery>=5.5.0,<6.0.0",
     "grandalf>=0.8",
     "langchain>=1.2.13",
     "langchain-openai>=1.1.11",
     "langchain-text-splitters>=1.1.1",
     "langgraph>=1.1.3",
+    "langgraph-checkpoint-postgres>=3.0.0,<4.0.0",
+    "langgraph-checkpoint-sqlite>=3.0.0,<4.0.0",
     "loguru>=0.7.3",
     "minio>=7.2.20",
+    "milvus-lite>=3.2.1,<4.0.0; sys_platform == 'win32'",
     "numpy>=2.4.3",
-    "pymilvus[milvus-lite,model]>=2.6.10",
+    "pymilvus[milvus-lite,model]>=2.6.10,<2.7.0",
     "pymongo>=4.16.0",
     "torch>=2.11.0",
     "flagembedding>=1.3.5",
@@ -24,7 +30,78 @@ dependencies = [
     "python-dotenv>=1.2.2",
     "openai-agents>=0.13.5",
     "dashscope>=1.25.16",
+    "pydantic-settings>=2.10.0,<3.0.0",
+    "prometheus-client>=0.22.0,<1.0.0",
+    "psycopg[binary,pool]>=3.2.0,<4.0.0",
+    "pycryptodome>=3.23.0,<4.0.0",
+    "redis>=6.0.0,<8.0.0",
+    "sqlalchemy>=2.0.40,<3.0.0",
 ]
+
+[dependency-groups]
+dev = [
+    "fakeredis>=2.31.0,<3.0.0",
+    "httpx>=0.28.0,<1.0.0",
+    "mypy>=1.17.0,<2.0.0",
+    "pre-commit>=4.3.0,<5.0.0",
+    "pytest>=8.4.0,<10.0.0",
+    "pytest-asyncio>=1.1.0,<2.0.0",
+    "pytest-cov>=6.2.0,<8.0.0",
+    "ruff>=0.12.0,<1.0.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-ra --strict-markers"
+asyncio_mode = "auto"
+markers = [
+    "integration: requires one or more external services",
+    "workflow: exercises a complete LangGraph workflow",
+    "evaluation: runs the RAG quality evaluation suite",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+extend-exclude = [
+    "test",
+    "output",
+    "data",
+    "logs",
+    "**/*-copy.py",
+    "**/*_v2.py",
+    "**/nodes_v1/**",
+    "**/node_demo.py",
+    "app/clients/mongo_history_utils_new.py",
+]
+
+[tool.ruff.lint]
+# Start with correctness checks on the legacy codebase. Tighten I/B/UP rules
+# incrementally as each subsystem receives tests.
+select = ["E4", "E7", "E9", "F"]
+ignore = ["E501", "F401", "F541", "F811"]
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+warn_unused_ignores = true
+no_implicit_optional = true
+disable_error_code = ["import-untyped"]
+exclude = [
+    "app/.*/.*copy.*\\.py$",
+    "app/.*/.*_v2\\.py$",
+    "app/clients/mongo_history_utils_new\\.py$",
+]
+
+[[tool.mypy.overrides]]
+module = [
+    "app.import_process.agent.*",
+    "app.import_process.services.import_runner",
+    "app.query_process.agent.*",
+    "app.clients.mongo_history_utils_new",
+]
+ignore_errors = true
 
 [tool.uv.sources]
 # 4GB 显存的本机优先使用 CPU 版，避免 CUDA 运行库和模型占满显存。

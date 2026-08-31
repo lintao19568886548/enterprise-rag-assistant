@@ -13,6 +13,7 @@ from pymongo import MongoClient, ASCENDING
 from bson import ObjectId
 # 导入dotenv模块：用于从.env文件加载环境变量，避免硬编码敏感配置（如MongoDB连接地址）
 from dotenv import load_dotenv
+from app.core.settings import settings
 
 # 加载.env文件中的环境变量，使os.getenv能读取到配置
 load_dotenv()
@@ -82,17 +83,31 @@ def get_history_mongo_tool() -> HistoryMongoTool:
 
 
 
-def clear_history(session_id: str) -> int:
+def clear_history(
+    session_id: str,
+    *,
+    tenant_id: str | None = None,
+    user_id: str | None = None,
+) -> int:
     """
     清空指定会话的所有历史对话记录
     :param session_id: 会话唯一标识，用于筛选要删除的记录
     :return: 实际删除的文档数量，删除失败返回0
     """
+    if settings.database_enabled:
+        from app.db.repositories import clear_history as clear_sql_history
+
+        return clear_sql_history(session_id, tenant_id=tenant_id, user_id=user_id)
     # 获取全局的HistoryMongoTool实例，使用单例模式避免重复创建数据库连接
     try:
         mongo_tool = get_history_mongo_tool()
         # 执行批量删除操作：删除所有session_id匹配的文档
-        result = mongo_tool.chat_message.delete_many({"session_id": session_id})
+        query = {"session_id": session_id}
+        if tenant_id is not None:
+            query["tenant_id"] = tenant_id
+        if user_id is not None:
+            query["user_id"] = user_id
+        result = mongo_tool.chat_message.delete_many(query)
         # 记录删除成功日志，包含删除数量和会话ID，便于问题排查
         logging.info(f"Deleted {result.deleted_count} messages for session {session_id}")
         # 返回实际删除的数量（delete_many的返回对象包含deleted_count属性）
@@ -109,9 +124,15 @@ def save_chat_message(
         role: str,
         text: str,
         rewritten_query: str = "",
-        item_names: List[str] = None,
-        image_urls: List[str] = None,
-        message_id: str = None
+        item_names: List[str] | None = None,
+        image_urls: List[str] | None = None,
+        message_id: str | None = None,
+        knowledge_base_id: str | None = None,
+        citations: List[Dict[str, Any]] | None = None,
+        model: str | None = None,
+        latency_ms: int | None = None,
+        user_id: str = "",
+        tenant_id: str = "",
 ) -> str:
     """
     写入/更新单条会话记录到MongoDB
@@ -125,6 +146,24 @@ def save_chat_message(
     :param message_id: 记录主键ID（可选，有值则更新，无值则新增）
     :return: 插入/更新的记录唯一标识（新增返回ObjectId字符串，更新返回传入的message_id）
     """
+    if settings.database_enabled:
+        from app.db.repositories import save_chat_message as save_sql_chat_message
+
+        return save_sql_chat_message(
+            session_id,
+            role,
+            text,
+            rewritten_query,
+            item_names,
+            image_urls,
+            message_id,
+            knowledge_base_id,
+            citations,
+            model,
+            latency_ms,
+            user_id,
+            tenant_id,
+        )
     # 生成当前时间的时间戳（秒级），用于记录消息的创建时间，后续用于排序和查询
     ts = datetime.now().timestamp()
 
@@ -136,6 +175,8 @@ def save_chat_message(
         "rewritten_query": rewritten_query or "",  # 问题优化后的改写，空值处理为空字符串
         "item_names": item_names,  # 关联商品名称列表
         "image_urls": image_urls,  # 关联图片URL列表
+        "user_id": user_id,
+        "tenant_id": tenant_id,
         "ts": ts  # 时间戳，排序和时间筛选维度
     }
 
@@ -163,6 +204,10 @@ def update_message_item_names(ids: List[str], item_names: List[str]) -> int:
     :param item_names: 要设置的新商品名称列表
     :return: 实际更新的文档数量，更新失败返回0
     """
+    if settings.database_enabled:
+        from app.db.repositories import update_message_item_names as update_sql_message_item_names
+
+        return update_sql_message_item_names(ids, item_names)
     # 获取全局的HistoryMongoTool实例，使用单例模式
     try:
         mongo_tool = get_history_mongo_tool()
@@ -187,7 +232,13 @@ def update_message_item_names(ids: List[str], item_names: List[str]) -> int:
         return 0
 
 
-def get_recent_messages(session_id: str, limit: int = 10) -> List[Dict[str, Any]]:
+def get_recent_messages(
+    session_id: str,
+    limit: int = 10,
+    *,
+    tenant_id: str | None = None,
+    user_id: str | None = None,
+) -> List[Dict[str, Any]]:
     """
     查询指定会话的最近N条对话记录，返回原始字典格式
     结果按时间正序排列，可直接喂给LLM作为上下文
@@ -195,11 +246,24 @@ def get_recent_messages(session_id: str, limit: int = 10) -> List[Dict[str, Any]
     :param limit: 条数限制，默认返回最近10条
     :return: 对话记录列表（字典格式），查询失败返回空列表
     """
+    if settings.database_enabled:
+        from app.db.repositories import get_recent_messages as get_recent_sql_messages
+
+        return get_recent_sql_messages(
+            session_id,
+            limit,
+            tenant_id=tenant_id,
+            user_id=user_id,
+        )
     # 获取全局的HistoryMongoTool实例，使用单例模式
     try:
         mongo_tool = get_history_mongo_tool()
         # 构造查询条件：仅查询指定session_id的记录
         query = {"session_id": session_id}
+        if tenant_id is not None:
+            query["tenant_id"] = tenant_id
+        if user_id is not None:
+            query["user_id"] = user_id
 
         # 执行查询：按时间戳升序排序，限制返回条数
         # find(query)：获取符合条件的游标（惰性加载，不立即查询）

@@ -1,11 +1,38 @@
 
 from app.clients.milvus_utils import create_hybrid_search_requests, get_milvus_client, hybrid_search
 from app.conf.milvus_config import milvus_config
+from app.core.settings import settings
+from app.core.metrics import RETRIEVAL_RESULTS
 from app.lm.embedding_utils import generate_embeddings
 from app.query_process.agent.node_base import NodeBase
 from app.core.logger import logger
 from app.query_process.agent.state import QueryGraphState, create_default_state
 from app.utils.task_utils import add_done_task
+from app.utils.milvus_utils import build_chunk_filter
+
+
+CHUNK_OUTPUT_FIELDS = [
+    "chunk_id",
+    "content",
+    "title",
+    "parent_title",
+    "file_title",
+    "file_name",
+    "item_name",
+    "knowledge_base_id",
+    "document_id",
+    "document_version",
+    "permission_scope",
+    "chunk_index",
+    "page_number",
+    "content_hash",
+    "section_title",
+    "parent_chunk_id",
+    "item_aliases",
+    "parser_version",
+    "created_at",
+    "is_active",
+]
 
 
 class NodeSearchEmbedding(NodeBase):
@@ -51,21 +78,24 @@ class NodeSearchEmbedding(NodeBase):
             collection_name = milvus_config.chunks_collection
             logger.info(f"准备在集合 '{collection_name}' 中执行混合检索")
 
-            # 4、处理 item_names 中的引号，防止注入或语法错误
-            expr = None
-            if item_names:
-                quoted = ", ".join(f'"{v}"' for v in item_names)
-                expr = f"item_name in [{quoted}]"
-                logger.info(f"过滤条件: {expr}")
-            else:
-                logger.info("未指定商品名过滤，将全库检索")
+            # 4、所有用户影响的值都先转义；生产环境强制知识库隔离。
+            expr = build_chunk_filter(
+                item_names,
+                state.get("knowledge_base_id"),
+                enforce_knowledge_base=True,
+            )
+            logger.info(
+                "检索过滤已构建，商品数量={}，知识库隔离={}",
+                len(item_names or []),
+                True,
+            )
 
             # 5、构造Milvus混合搜索请求对象
             reqs = create_hybrid_search_requests(
                 dense_vector = dense_vec,
                 sparse_vector = sparse_vec,
                 expr = expr,
-                limit = 10  # 底层检索返回数量（后续会再过滤为5，预留更多结果做重排序）
+                limit=settings.retrieval_candidate_limit,
             )
 
             # 6、执行混合向量检索
@@ -77,12 +107,13 @@ class NodeSearchEmbedding(NodeBase):
                 reqs=reqs,  # 构造好的混合搜索请求对象（稠密+稀疏）
                 ranker_weights=(0.8, 0.2),  # 稠/稀疏向量评分权重配比，各占50%（可按业务调优）
                 norm_score=True,  # 开启评分归一化，将距离值转为0-1区间的相似度评分
-                limit=5,  # 最终返回的TOP5相似度最高结果
-                output_fields=["chunk_id", "content", "item_name"]  # 指定返回的业务字段
+                limit=settings.retrieval_top_k,
+                output_fields=CHUNK_OUTPUT_FIELDS,
             )
 
             # 7、构造并返回结果：若检索结果非空，取res[0]，否则返回空列表
-            logger.info(f"节点search_embedding处理成功 :{res}")
+            logger.info("普通混合检索完成，结果数={}", len(res[0]) if res else 0)
+            RETRIEVAL_RESULTS.labels("hybrid").observe(len(res[0]) if res else 0)
 
             add_done_task(state["session_id"], self.name)
             return {"embedding_chunks": res[0] if res else []}

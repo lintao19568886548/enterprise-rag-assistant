@@ -93,6 +93,22 @@
       cursor:pointer;
     }
     .btn:disabled{opacity:.6;cursor:not-allowed}
+    .kb-select{
+      max-width:220px;
+      border:1px solid var(--border);
+      border-radius:9px;
+      background:#fff;
+      color:var(--text);
+      padding:7px 9px;
+      font-size:12px;
+    }
+    .api-key{
+      width:150px;
+      border:1px solid var(--border);
+      border-radius:9px;
+      padding:7px 9px;
+      font-size:12px;
+    }
 
     .chat{
       flex:1;
@@ -196,6 +212,23 @@
       text-decoration:none;
       word-break:break-all;
     }
+    .quality-badge{
+      display:inline-flex;
+      margin-top:10px;
+      padding:4px 8px;
+      border-radius:999px;
+      background:#eef7ff;
+      color:#35617f;
+      font-size:11px;
+    }
+    .citations{
+      margin-top:10px;
+      border-top:1px solid var(--border);
+      padding-top:8px;
+    }
+    .citations-title{font-size:12px;font-weight:600;color:#56657a;margin-bottom:5px}
+    .citation{font-size:12px;color:#66758a;margin:5px 0;overflow-wrap:anywhere}
+    .citation a{color:#1976b9;text-decoration:none}
 
     .typing{
       display:inline-flex;gap:6px;align-items:center;
@@ -258,6 +291,30 @@
       background:#f7f9fc;
       color:#3b4a5a;
     }
+    @media (max-width: 720px){
+      body{padding:0;align-items:stretch}
+      .app{height:100dvh;max-width:none;border-radius:0}
+      .topbar{align-items:flex-start;flex-wrap:wrap;padding:12px}
+      .brand{min-width:0;width:100%}
+      .top-actions{
+        margin-left:0;
+        width:100%;
+        display:grid;
+        grid-template-columns:minmax(0,1fr) minmax(0,1fr);
+        gap:8px;
+      }
+      .kb-select,.api-key{width:100%;max-width:none;min-width:0}
+      .top-actions > label{margin-right:0 !important;min-height:32px}
+      .pill,.btn{min-width:0;text-align:center;white-space:nowrap}
+      .chat{padding:10px 8px}
+      .bubble{max-width:90%}
+      .answer-images img{max-height:260px}
+      .composer{padding:10px 8px}
+      .send{width:74px}
+    }
+    @media (prefers-reduced-motion: reduce){
+      *,*::before,*::after{animation-duration:.01ms !important;animation-iteration-count:1 !important;scroll-behavior:auto !important}
+    }
   </style>
 </head>
 <body>
@@ -271,6 +328,10 @@
         </div>
       </div>
       <div class="top-actions">
+        <select class="kb-select" id="kbSelect" aria-label="选择知识库">
+          <option value="00000000-0000-0000-0000-000000000010">默认知识库</option>
+        </select>
+        <input class="api-key" id="apiKey" type="password" autocomplete="off" placeholder="生产环境 API Key" aria-label="API Key">
         <label style="font-size:12px;display:flex;align-items:center;gap:4px;cursor:pointer;user-select:none;color:var(--muted);margin-right:10px;">
           <input type="checkbox" id="streamToggle" checked> 流式输出
         </label>
@@ -306,12 +367,79 @@
     const apiPill = document.getElementById('apiPill');
     const btnClear = document.getElementById('btnClear');
     const streamToggle = document.getElementById('streamToggle');
+    const kbSelect = document.getElementById('kbSelect');
+    const apiKeyEl = document.getElementById('apiKey');
+    apiKeyEl.value = sessionStorage.getItem('kb_api_key') || '';
+
+    const DEFAULT_KB_ID = '00000000-0000-0000-0000-000000000010';
+    let knowledgeBaseId = localStorage.getItem('kb_knowledge_base_id') || DEFAULT_KB_ID;
 
     // Session ID Logic
     let sessionId = localStorage.getItem('kb_session_id');
     if (!sessionId) {
       sessionId = 'sess-' + Math.random().toString(36).slice(2) + Date.now().toString(36);
       localStorage.setItem('kb_session_id', sessionId);
+    }
+
+    function resetSessionForKnowledgeBase(){
+      sessionId = 'sess-' + Math.random().toString(36).slice(2) + Date.now().toString(36);
+      localStorage.setItem('kb_session_id', sessionId);
+      localStorage.setItem('kb_knowledge_base_id', knowledgeBaseId);
+    }
+
+    function authHeaders(extra){
+      const headers = {...(extra || {})};
+      const key = (apiKeyEl.value || '').trim();
+      if(key) headers['X-API-Key'] = key;
+      return headers;
+    }
+
+    function createSSEClient(url){
+      const handlers = new Map();
+      const controller = new AbortController();
+      let closed = false;
+      const client = {
+        addEventListener(name, callback){
+          if(!handlers.has(name)) handlers.set(name, []);
+          handlers.get(name).push(callback);
+        },
+        close(){
+          closed = true;
+          controller.abort();
+        }
+      };
+      const emit = (name, data) => {
+        for(const callback of (handlers.get(name) || [])) callback({data});
+      };
+      queueMicrotask(async () => {
+        try{
+          const response = await fetch(url, {headers: authHeaders(), signal: controller.signal});
+          if(!response.ok || !response.body) throw new Error(`SSE HTTP ${response.status}`);
+          const reader = response.body.getReader();
+          const decoder = new TextDecoder();
+          let buffer = '';
+          while(!closed){
+            const {value, done} = await reader.read();
+            if(done) break;
+            buffer += decoder.decode(value, {stream:true}).replaceAll('\r\n', '\n');
+            let boundary;
+            while((boundary = buffer.indexOf('\n\n')) !== -1){
+              const block = buffer.slice(0, boundary);
+              buffer = buffer.slice(boundary + 2);
+              let eventName = 'message';
+              const dataLines = [];
+              for(const line of block.split('\n')){
+                if(line.startsWith('event:')) eventName = line.slice(6).trim();
+                if(line.startsWith('data:')) dataLines.push(line.slice(5).trimStart());
+              }
+              if(dataLines.length) emit(eventName, dataLines.join('\n'));
+            }
+          }
+        }catch(error){
+          if(!closed) emit('error', JSON.stringify({error: error.message || 'SSE 连接失败'}));
+        }
+      });
+      return client;
     }
 
     function scrollToBottom(){
@@ -341,8 +469,9 @@
       // 只要包含 .jpg .png 等扩展名，且后面是 ? # 或 结束，或者被某些标点截断前
       // 简单判断：路径部分以图片后缀结尾
       try {
-        const u = new URL(url);
-        return /\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(u.pathname);
+        const u = new URL(url, API_BASE);
+        return ['http:', 'https:'].includes(u.protocol)
+          && /\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(u.pathname);
       } catch (e) {
         // 如果 new URL 失败（比如相对路径或非法字符），退回正则匹配
         return /\.(png|jpe?g|gif|webp|bmp|svg)(\?|#|$)/i.test(url || '');
@@ -352,8 +481,44 @@
     function normalizeUrl(rawUrl){
       const s = String(rawUrl || '').trim();
       if(!s) return '';
-      // 尽量保留原始 URL，但把空格编码，避免 img src 失败
-      return s.replace(/\s/g, '%20');
+      try{
+        const parsed = new URL(s, API_BASE);
+        if(!['http:', 'https:'].includes(parsed.protocol)) return '';
+        if(parsed.pathname.startsWith('/images/') && ['127.0.0.1', 'localhost'].includes(parsed.hostname)){
+          const api = new URL(API_BASE);
+          parsed.protocol = api.protocol;
+          parsed.host = api.host;
+        }
+        return parsed.href;
+      }catch(_){
+        return '';
+      }
+    }
+
+    async function loadProtectedImage(img, link, rawUrl){
+      const safeUrl = normalizeUrl(rawUrl);
+      if(!safeUrl){
+        img.remove();
+        link.remove();
+        return;
+      }
+      try{
+        const parsed = new URL(safeUrl);
+        const apiOrigin = new URL(API_BASE).origin;
+        if(parsed.origin === apiOrigin && parsed.pathname.startsWith('/images/')){
+          const response = await fetch(safeUrl, {headers: authHeaders()});
+          if(!response.ok) throw new Error(`image HTTP ${response.status}`);
+          const objectUrl = URL.createObjectURL(await response.blob());
+          img.src = objectUrl;
+          link.href = objectUrl;
+        }else{
+          img.src = safeUrl;
+          link.href = safeUrl;
+        }
+      }catch(_){
+        img.remove();
+        link.remove();
+      }
     }
 
     function dedupeKeepOrder(arr){
@@ -454,7 +619,7 @@
       return keywords.some(k => t.includes(k));
     }
 
-    function renderAnswerWithImages(containerEl, answerText, candidateImageUrls){
+    function renderAnswerWithImages(containerEl, answerText, candidateImageUrls, citations, confidence, hasEvidence){
       const { text, images: imagesFromBlock } = parseAnswerAndImages(answerText);
       const candidates = Array.isArray(candidateImageUrls)
         ? candidateImageUrls.map(normalizeUrl).filter(isImageUrl)
@@ -496,9 +661,9 @@
         imgWrap.className = 'answer-images';
         for(const url of images){
           const safeUrl = normalizeUrl(url);
+          if(!safeUrl) continue;
           const img = document.createElement('img');
           img.loading = 'lazy';
-          img.src = safeUrl;
           img.alt = '参考图片';
           img.referrerPolicy = 'no-referrer';
           img.addEventListener('error', () => {
@@ -507,13 +672,58 @@
           imgWrap.appendChild(img);
 
           const link = document.createElement('a');
-          link.href = safeUrl;
           link.target = '_blank';
           link.rel = 'noopener noreferrer';
-          link.textContent = url;
+          link.textContent = '查看原图';
           imgWrap.appendChild(link);
+          loadProtectedImage(img, link, safeUrl);
         }
         containerEl.appendChild(imgWrap);
+      }
+
+      if(typeof confidence === 'number'){
+        const badge = document.createElement('div');
+        badge.className = 'quality-badge';
+        badge.textContent = hasEvidence === false
+          ? '证据不足 · 已拒答'
+          : `证据置信度 ${(Math.max(0, Math.min(1, confidence)) * 100).toFixed(0)}%`;
+        containerEl.appendChild(badge);
+      }
+
+      const citationItems = Array.isArray(citations) ? citations : [];
+      if(citationItems.length > 0){
+        const wrap = document.createElement('div');
+        wrap.className = 'citations';
+        const title = document.createElement('div');
+        title.className = 'citations-title';
+        title.textContent = '引用资料';
+        wrap.appendChild(title);
+        for(const citation of citationItems){
+          const row = document.createElement('div');
+          row.className = 'citation';
+          const label = `${citation.label || ''} ${citation.title || '未命名资料'}`.trim();
+          const detail = [
+            citation.page_number != null ? `第 ${citation.page_number} 页` : '',
+            citation.chunk_id ? `切片 ${citation.chunk_id}` : '',
+            typeof citation.score === 'number' ? `相关度 ${citation.score.toFixed(3)}` : ''
+          ].filter(Boolean).join(' · ');
+          const citationUrl = normalizeUrl(citation.url || '');
+          if(citationUrl){
+            const link = document.createElement('a');
+            link.href = citationUrl;
+            link.target = '_blank';
+            link.rel = 'noopener noreferrer';
+            link.textContent = label;
+            row.appendChild(link);
+          }else{
+            row.textContent = label;
+          }
+          if(detail){
+            row.appendChild(document.createTextNode(` · ${detail}`));
+          }
+          wrap.appendChild(row);
+        }
+        containerEl.appendChild(wrap);
       }
     }
 
@@ -545,7 +755,7 @@
       scrollToBottom();
     }
 
-    function addBotMsgWithTime(text, ts, imageUrls){
+    function addBotMsgWithTime(text, ts, imageUrls, citations){
       const id = 'bot-his-' + Math.random().toString(36).slice(2);
       const html = `
         <div class="msg bot" id="${id}">
@@ -560,7 +770,7 @@
       const el = document.getElementById(id);
       if(el){
         const answerEl = el.querySelector('.answer');
-        renderAnswerWithImages(answerEl, text || '', imageUrls || []);
+        renderAnswerWithImages(answerEl, text || '', imageUrls || [], citations || []);
       }
       scrollToBottom();
     }
@@ -620,7 +830,7 @@
       }
     }
 
-    function finalizeBotAnswer(botMsgEl, answer, error, imageUrls){
+    function finalizeBotAnswer(botMsgEl, answer, error, imageUrls, citations, confidence, hasEvidence){
       const bubble = botMsgEl.querySelector('.bubble');
       const progress = botMsgEl.querySelector('details.progress');
       const err = (error || '').trim();
@@ -649,7 +859,7 @@
       const answerEl = document.createElement('div');
       answerEl.className = 'answer';
       bubble.appendChild(answerEl);
-      renderAnswerWithImages(answerEl, answer || '', imageUrls || []);
+      renderAnswerWithImages(answerEl, answer || '', imageUrls || [], citations || [], confidence, hasEvidence);
       if(progressEl) bubble.appendChild(progressEl);
     }
 
@@ -663,9 +873,35 @@
       }
     }
 
+    async function loadKnowledgeBases(){
+      try{
+        const res = await fetch(`${API_BASE}/knowledge-bases`, {headers: authHeaders()});
+        if(!res.ok) throw new Error('knowledge bases unavailable');
+        const data = await res.json();
+        const items = Array.isArray(data.items) ? data.items : [];
+        kbSelect.textContent = '';
+        for(const item of items){
+          const option = document.createElement('option');
+          option.value = item.id;
+          option.textContent = item.name || item.id;
+          kbSelect.appendChild(option);
+        }
+        if(items.some(item => item.id === knowledgeBaseId)){
+          kbSelect.value = knowledgeBaseId;
+        }else if(items.length > 0){
+          knowledgeBaseId = items[0].id;
+          kbSelect.value = knowledgeBaseId;
+          localStorage.setItem('kb_knowledge_base_id', knowledgeBaseId);
+        }
+      }catch(_){
+        kbSelect.value = DEFAULT_KB_ID;
+        knowledgeBaseId = DEFAULT_KB_ID;
+      }
+    }
+
     async function loadHistory(){
       try{
-        const res = await fetch(`${API_BASE}/history/${sessionId}`);
+        const res = await fetch(`${API_BASE}/history/${sessionId}`, {headers: authHeaders()});
         if(!res.ok) return;
         const data = await res.json();
         const items = Array.isArray(data.items) ? data.items : [];
@@ -677,7 +913,7 @@
           if(item.role === 'user'){
             addUserMsgWithTime(item.text || '', item.ts);
           }else{
-            addBotMsgWithTime(item.text || '', item.ts, item.image_urls || []);
+            addBotMsgWithTime(item.text || '', item.ts, item.image_urls || [], item.citations || []);
           }
         }
         scrollToBottom();
@@ -688,10 +924,11 @@
       const isStream = streamToggle.checked;
       const res = await fetch(`${API_BASE}/query`, {
         method: 'POST',
-        headers: {'Content-Type':'application/json'},
+        headers: authHeaders({'Content-Type':'application/json'}),
         body: JSON.stringify({
           query: text,
           session_id: sessionId,
+          knowledge_base_id: knowledgeBaseId,
           is_stream: isStream
         })
       });
@@ -706,18 +943,18 @@
       const typing = botMsgEl.querySelector('.typing');
       const interval = setInterval(async () => {
         try{
-          const res = await fetch(`${API_BASE}/status/${taskId}`);
+          const res = await fetch(`${API_BASE}/status/${taskId}`, {headers: authHeaders()});
           const data = await res.json();
           renderProgress(botMsgEl, data.done_list, data.running_list, data.status);
 
           if(data.status === 'completed'){
             if(typing) typing.remove();
-            finalizeBotAnswer(botMsgEl, data.answer, data.error, data.image_urls || []);
+            finalizeBotAnswer(botMsgEl, data.answer, data.error, data.image_urls || [], data.citations || [], data.confidence, data.has_sufficient_evidence);
             clearInterval(interval);
             sendBtn.disabled = false;
           }else if(data.status === 'failed'){
             if(typing) typing.remove();
-            finalizeBotAnswer(botMsgEl, data.answer, data.error || 'failed', data.image_urls || []);
+            finalizeBotAnswer(botMsgEl, data.answer, data.error || 'failed', data.image_urls || [], data.citations || [], data.confidence, data.has_sufficient_evidence);
             clearInterval(interval);
             sendBtn.disabled = false;
           }
@@ -749,7 +986,7 @@
           // 非流式：直接拿到结果
           // data: { session_id, answer, done_list, error, message }
           renderProgress(botMsgEl, data.done_list || [], [], 'completed');
-          finalizeBotAnswer(botMsgEl, data.answer, data.error, data.image_urls || []);
+          finalizeBotAnswer(botMsgEl, data.answer, data.error, data.image_urls || [], data.citations || [], data.confidence, data.has_sufficient_evidence);
           sendBtn.disabled = false;
           return;
         }
@@ -765,7 +1002,7 @@
           bubble.insertBefore(answerEl, bubble.firstChild);
         }
 
-        const es = new EventSource(`${API_BASE}/stream/${session_id}`);
+        const es = createSSEClient(`${API_BASE}/stream/${session_id}`);
         console.log('[perf] C EventSource created', performance.now(), { session_id });
         let rawAnswerText = '';
 
@@ -811,7 +1048,7 @@
             const d = JSON.parse(e.data || '{}');
             // 流式 delta 可能不包含“【图片】/图片列表”，最终包的 d.answer 才是完整答案；优先使用 d.answer
             const finalText = (d && typeof d.answer === 'string' && d.answer.trim().length > 0) ? d.answer : (rawAnswerText || answerEl.textContent || '');
-            renderAnswerWithImages(answerEl, finalText, d.image_urls || []);
+            renderAnswerWithImages(answerEl, finalText, d.image_urls || [], d.citations || [], d.confidence, d.has_sufficient_evidence);
           }catch(_){}
           es.close();
           sendBtn.disabled = false;
@@ -831,7 +1068,7 @@
           try{
             const d = JSON.parse(e.data || '{}');
             const finalText = (d && typeof d.answer === 'string' && d.answer.trim().length > 0) ? d.answer : (rawAnswerText || answerEl.textContent || '');
-            renderAnswerWithImages(answerEl, finalText, d.image_urls || []);
+            renderAnswerWithImages(answerEl, finalText, d.image_urls || [], d.citations || [], d.confidence, d.has_sufficient_evidence);
           }catch(_){}
           es.close();
           sendBtn.disabled = false;
@@ -876,7 +1113,7 @@
       if(!confirm('确定要清空当前会话的历史记录吗？这将无法恢复。')) return;
 
       try {
-        const res = await fetch(`${API_BASE}/history/${sessionId}`, { method: 'DELETE' });
+        const res = await fetch(`${API_BASE}/history/${sessionId}`, { method: 'DELETE', headers: authHeaders() });
         if(!res.ok) {
            console.error("Failed to clear history backend, status:", res.status);
            alert('服务端清空失败，仅清空本地显示');
@@ -892,11 +1129,23 @@
       scrollToBottom();
     });
 
+    kbSelect.addEventListener('change', async () => {
+      knowledgeBaseId = kbSelect.value || DEFAULT_KB_ID;
+      resetSessionForKnowledgeBase();
+      const nodes = Array.from(chatEl.querySelectorAll('.msg'));
+      for(let i=1;i<nodes.length;i++) nodes[i].remove();
+      await loadHistory();
+      inputEl.focus();
+    });
+    apiKeyEl.addEventListener('change', () => {
+      sessionStorage.setItem('kb_api_key', (apiKeyEl.value || '').trim());
+      apiHealth();
+    });
+
     apiHealth();
     setInterval(apiHealth, 5000);
-    loadHistory();
+    loadKnowledgeBases().then(loadHistory);
     setTimeout(() => inputEl.focus(), 200);
   </script>
 </body>
 </html>
-

@@ -7,12 +7,14 @@ from app.clients.milvus_utils import get_milvus_client, create_hybrid_search_req
 from app.clients.mongo_history_utils import get_recent_messages, save_chat_message, update_message_item_names
 from app.conf.milvus_config import milvus_config
 from app.core.load_prompt import load_prompt
+from app.core.settings import settings
 from app.lm.embedding_utils import generate_embeddings
 from app.lm.lm_utils import get_llm_client
 from app.query_process.agent.node_base import NodeBase
 from app.core.logger import logger
 from app.query_process.agent.state import QueryGraphState, create_default_state
 from app.utils.task_utils import add_done_task
+from app.utils.milvus_utils import escape_milvus_string
 
 
 class NodeItemNameConfirm(NodeBase):
@@ -37,13 +39,24 @@ class NodeItemNameConfirm(NodeBase):
         logger.info(f"步骤1：参数校验通过")
 
         # 步骤2：获取历史记录
-        history = get_recent_messages(session_id)
+        history = get_recent_messages(
+            session_id,
+            tenant_id=state.get("tenant_id"),
+            user_id=state.get("user_id"),
+        )
         logger.info(f"步骤2：获取到 {len(history)} 条历史消息")
         # 更新状态
         state["history"] = history
 
         # 步骤3：用户初始消息保存
-        message_id = save_chat_message(session_id, "user", original_query)
+        message_id = save_chat_message(
+            session_id,
+            "user",
+            original_query,
+            knowledge_base_id=state.get("knowledge_base_id"),
+            user_id=state.get("user_id") or "",
+            tenant_id=state.get("tenant_id") or "",
+        )
         logger.info(f"步骤3：用户消息已初始保存, ID: {message_id}")
 
         # 步骤4：提取信息
@@ -57,7 +70,10 @@ class NodeItemNameConfirm(NodeBase):
         # 5. & 6. 如果有提取到商品名，进行搜索和对齐
         align_result = {}
         if len(item_names) > 0:
-            query_results = self._step_5_vectorize_and_query(item_names)
+            query_results = self._step_5_vectorize_and_query(
+                item_names,
+                state.get("knowledge_base_id"),
+            )
             align_result = self._step_6_align_item_names(query_results)
 
         else:
@@ -155,7 +171,7 @@ class NodeItemNameConfirm(NodeBase):
 
             # 8、数据解析：将JSON字符串转为字典
             result = json.loads(content)
-            logger.info(f"步骤4： 解析 LLM 结果: {result}")
+            logger.info("步骤4：LLM 结构化结果解析完成，商品数量={}", len(result.get("item_names") or []))
 
             # 9、健壮性处理
             # 确保返回结果包含item_names字段，无则设为空列表
@@ -174,7 +190,11 @@ class NodeItemNameConfirm(NodeBase):
             # 异常时返回默认结果：空商品名列表+原始查询
             return {"item_names": [], "rewritten_query": query}
 
-    def _step_5_vectorize_and_query(self, item_names) -> List[Dict]:
+    def _step_5_vectorize_and_query(
+        self,
+        item_names,
+        knowledge_base_id: str | None = None,
+    ) -> List[Dict]:
         """
            把分析出的item_names逐个向量化（BGEM3模型），并在Milvus向量数据库(kb_item_names)中执行混合搜索，获取匹配评分
            :param item_names: 列表[字符串] - 步骤4中 提取的商品名列表（如["苹果15", "华为P60"]）
@@ -193,7 +213,7 @@ class NodeItemNameConfirm(NodeBase):
                     ...
                 ]
         """
-        logger.info(f"步骤5：开始向量化并查询条目: {item_names}")
+        logger.info("步骤5：开始向量化并查询，条目数量={}", len(item_names))
 
         # 1、初始化最终返回结果列表，存储每个商品名的向量化查询结果
         results = []
@@ -218,7 +238,7 @@ class NodeItemNameConfirm(NodeBase):
         # 6、遍历每个商品名称，逐个执行向量搜索（保证结果与原始商品名一一对应）
         for i in range(len(item_names)):
             try:
-                logger.info(f"步骤5：正在处理商品 {i+1}/{len(item_names)}: {item_names[i]}")
+                logger.info("步骤5：正在处理商品 {}/{}", i + 1, len(item_names))
                 # 从批量生成的向量结果中，取出当前商品名对应的稠密向量（高维连续值，如[0.12, 0.35,...]）
                 dense_vector = embeddings.get("dense")[i]
                 # 从批量生成的向量结果中，取出当前商品名对应的稀疏向量（键值对，如{100:0.747, 205:0.664}）
@@ -226,13 +246,20 @@ class NodeItemNameConfirm(NodeBase):
 
                 # 构造Milvus混合搜索请求对象，传入稠/稀疏向量，指定返回Top5匹配结果
                 # reqs返回格式：[稠密向量搜索请求, 稀疏向量搜索请求]
+                if not knowledge_base_id:
+                    raise ValueError("knowledge_base_id is required for isolated item lookup")
+                expr = (
+                    f'knowledge_base_id == "{escape_milvus_string(knowledge_base_id)}" '
+                    "and is_active == true"
+                )
                 reqs = create_hybrid_search_requests(
                     dense_vector=dense_vector,
                     sparse_vector=sparse_vector,
-                    limit=5
+                    limit=5,
+                    expr=expr,
                 )
 
-                logger.info(f"步骤5：正在 Milvus 集合 '{collection_name}' 中执行混合搜索: '{item_names[i]}'")
+                logger.info("步骤5：正在 Milvus 集合 '{}' 中执行混合搜索", collection_name)
                 # 执行BGEM3混合向量搜索，获取数据库中的匹配结果和评分
                 # 默认配置：稠/稀疏向量权重各0.8/0.2，开启评分归一化（将距离值转为0-1相似度评分）
                 search_res = hybrid_search(
@@ -245,7 +272,7 @@ class NodeItemNameConfirm(NodeBase):
                     output_fields=["item_name"]  # 指定返回Milvus中存储的商品名字段（业务字段）
                 )
 
-                logger.info(f"步骤5：'{item_names[i]}' 搜索完成。找到 {len(search_res[0]) if search_res else 0} 个匹配项。")
+                logger.info("步骤5：商品搜索完成，匹配数={}", len(search_res[0]) if search_res else 0)
 
                 # 初始化当前商品名的匹配结果列表，存储匹配到的商品名+对应相似度评分
                 matches = []
@@ -270,7 +297,7 @@ class NodeItemNameConfirm(NodeBase):
 
             # 捕获单个商品名处理的异常（不中断其他商品名执行），仅记录错误日志
             except Exception as e:
-                logger.error(f"步骤5：查询商品名 '{item_names[i]}' 时出错: {e}")
+                logger.error("步骤5：商品名查询失败，error={}", e.__class__.__name__)
 
         # 返回所有商品名的向量化+搜索结果列表
         return results
@@ -295,7 +322,7 @@ class NodeItemNameConfirm(NodeBase):
         # 2、初始化候选商品名列表（低置信度，需用户确认的商品名）
         options: List[str] = []
 
-        logger.info(f"步骤6：获得待处理的数据源：{query_results}")
+        logger.info("步骤6：待对齐商品组数量={}", len(query_results))
 
         for res in query_results:
             # 提取原始的数据，商品名和匹配结果
@@ -419,7 +446,10 @@ class NodeItemNameConfirm(NodeBase):
                 role="assistant",  # 消息角色：助手
                 text=state["answer"],  # 消息内容：向用户确认的提示语/无结果提示语
                 rewritten_query="",  # 助手消息无需改写查询，设为空
-                item_names=state.get("item_names", [])  # 关联的商品名列表（分支B/C均为空）
+                item_names=state.get("item_names", []),  # 关联的商品名列表（分支B/C均为空）
+                knowledge_base_id=state.get("knowledge_base_id"),
+                user_id=state.get("user_id") or "",
+                tenant_id=state.get("tenant_id") or "",
             )
 
         # 强制更新本次用户原始问题的关联信息（核心：补充改写查询、商品名）
@@ -429,7 +459,10 @@ class NodeItemNameConfirm(NodeBase):
             text=state["original_query"],  # 消息内容：用户原始查询
             rewritten_query=rewritten_query,  # 补充step3改写后的完整问题
             item_names=state.get("item_names", []),  # 补充关联的商品名列表
-            message_id=message_id  # 消息ID，指定更新已存在的用户消息（而非新增）
+            message_id=message_id,  # 消息ID，指定更新已存在的用户消息（而非新增）
+            knowledge_base_id=state.get("knowledge_base_id"),
+            user_id=state.get("user_id") or "",
+            tenant_id=state.get("tenant_id") or "",
         )
 
         # 返回最终会话状态，供下游节点使用

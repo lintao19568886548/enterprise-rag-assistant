@@ -1,4 +1,7 @@
 from abc import ABC, abstractmethod
+import time
+
+from app.core.metrics import WORKFLOW_NODE_LATENCY, WORKFLOW_NODE_RUNS
 from app.core.logger import logger
 from app.query_process.agent.state import QueryGraphState
 from app.utils.format_utils import format_state
@@ -47,6 +50,7 @@ class NodeBase(ABC):
 
 
          add_running_task(state['session_id'], self.name, state.get("is_stream"))
+         started = time.perf_counter()
 
          try:
 
@@ -62,6 +66,7 @@ class NodeBase(ABC):
              # 节点完成日志，打印当前工作流状态
              logger.debug(f"【{self.name}】节点更新后工作流状态：{format_state(state)}")
              logger.info(f"{'*' * 20}【{self.name}】节点执行完成{'*' * 20}\n")
+             WORKFLOW_NODE_RUNS.labels("query", self.name, "success").inc()
 
              return state
 
@@ -71,8 +76,11 @@ class NodeBase(ABC):
              # 仅在模板中放占位符，避免异常文本中的 JSON 花括号被 Loguru
              # 当成新的格式占位符解析，进而掩盖原始异常。
              logger.opt(exception=True).error("【{}】流程执行失败：{}", self.name, e)
+             WORKFLOW_NODE_RUNS.labels("query", self.name, "error").inc()
 
              raise  # 重新抛出异常，确保工作流引擎知道此节点失败并停止后续流程
+         finally:
+             WORKFLOW_NODE_LATENCY.labels("query", self.name).observe(time.perf_counter() - started)
 
     @abstractmethod
     def process(self, state: QueryGraphState) -> QueryGraphState:

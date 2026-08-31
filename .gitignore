@@ -17,6 +17,7 @@ __pycache__/
 .coverage
 coverage.xml
 htmlcov/
+evaluation/reports/
 
 # Runtime data and logs
 logs/

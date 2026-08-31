@@ -36,3 +36,23 @@ def escape_milvus_string(value: Union[str, None]) -> str:
     s = s.replace("\r", " ").replace("\n", " ").replace("\t", " ")
 
     return s
+
+
+def build_chunk_filter(
+    item_names: list[str] | None,
+    knowledge_base_id: str | None,
+    *,
+    enforce_knowledge_base: bool,
+) -> str | None:
+    """Build a Milvus expression from escaped, server-controlled fields."""
+    clauses: list[str] = []
+    if item_names:
+        values = [f'"{escape_milvus_string(value)}"' for value in item_names if str(value).strip()]
+        if values:
+            clauses.append(f"item_name in [{', '.join(values)}]")
+    if enforce_knowledge_base:
+        if not knowledge_base_id:
+            raise ValueError("knowledge_base_id is required when knowledge-base filtering is enabled")
+        clauses.append(f'knowledge_base_id == "{escape_milvus_string(knowledge_base_id)}"')
+        clauses.append("is_active == true")
+    return " and ".join(clauses) if clauses else None
