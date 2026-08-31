@@ -21,7 +21,7 @@ from app.core.errors import AppError, ErrorCode
 from app.core.health import create_health_router
 from app.core.logger import logger
 from app.core.middleware import install_common_api_features
-from app.core.security import RequireAdmin, RequireReadonly
+from app.core.security import RequireAdmin, RequireEditor, RequireReadonly
 from app.core.settings import settings
 from app.import_process.agent.kb_import_workflow import get_default_import_workflow
 from app.import_process.services.import_runner import run_import_graph
@@ -126,7 +126,7 @@ def _upload_to_minio(
 )
 async def upload_files(
     background_tasks: BackgroundTasks,
-    principal: RequireAdmin,
+    principal: RequireEditor,
     files: list[UploadFile] = File(...),
     knowledge_base_id: str = Form(default=DEFAULT_KNOWLEDGE_BASE_ID),
 ):
@@ -237,11 +237,24 @@ async def upload_files(
             from app.worker.tasks import import_document_task
 
             import_document_task.apply_async(
-                args=[task_id, str(task_dir), str(saved.path)],
+                args=[
+                    task_id,
+                    str(task_dir),
+                    str(saved.path),
+                    principal.tenant_id,
+                    principal.user_id,
+                ],
                 task_id=task_id,
             )
         else:
-            background_tasks.add_task(run_import_graph, task_id, str(task_dir), str(saved.path))
+            background_tasks.add_task(
+                run_import_graph,
+                task_id,
+                str(task_dir),
+                str(saved.path),
+                principal.tenant_id,
+                principal.user_id,
+            )
         response_files.append(
             {
                 "task_id": task_id,
@@ -387,11 +400,18 @@ async def retry_task(
         from app.worker.tasks import import_document_task
 
         import_document_task.apply_async(
-            args=[task_id, local_dir, local_file_path],
+            args=[task_id, local_dir, local_file_path, principal.tenant_id, principal.user_id],
             task_id=task_id,
         )
     else:
-        background_tasks.add_task(run_import_graph, task_id, local_dir, local_file_path)
+        background_tasks.add_task(
+            run_import_graph,
+            task_id,
+            local_dir,
+            local_file_path,
+            principal.tenant_id,
+            principal.user_id,
+        )
     return {"task_id": task_id, "status": TASK_STATUS_PENDING, "retried": True}
 
 
@@ -468,7 +488,13 @@ async def rebuild_document(
         from app.worker.tasks import import_document_task
 
         import_document_task.apply_async(
-            args=[task_id, str(task_dir), str(local_file_path)],
+            args=[
+                task_id,
+                str(task_dir),
+                str(local_file_path),
+                principal.tenant_id,
+                principal.user_id,
+            ],
             task_id=task_id,
         )
     else:
@@ -477,6 +503,8 @@ async def rebuild_document(
             task_id,
             str(task_dir),
             str(local_file_path),
+            principal.tenant_id,
+            principal.user_id,
         )
     return {
         "task_id": task_id,

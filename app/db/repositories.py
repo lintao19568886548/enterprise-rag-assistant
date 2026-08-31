@@ -32,7 +32,7 @@ DEFAULT_TENANT_ID = "00000000-0000-0000-0000-000000000100"
 
 
 def ensure_defaults() -> None:
-    if not settings.database_enabled:
+    if not settings.database_enabled or settings.is_production:
         return
     with session_scope() as session:
         tenant = session.get(Tenant, DEFAULT_TENANT_ID)

@@ -22,6 +22,7 @@ from app.core.logger import logger
 from app.core.middleware import install_common_api_features
 from app.core.security import RequireAdmin, RequireReadonly, RequireUser
 from app.core.settings import settings
+from app.core.tenant_context import identity_context
 from app.db.repositories import (
     DEFAULT_KNOWLEDGE_BASE_ID,
     DEFAULT_TENANT_ID,
@@ -258,6 +259,25 @@ async def query(
 
 
 def run_query_graph(
+    session_id: str,
+    user_query: str,
+    knowledge_base_id: str = DEFAULT_KNOWLEDGE_BASE_ID,
+    is_stream: bool = True,
+    user_id: str = DEFAULT_USER_ID,
+    tenant_id: str = DEFAULT_TENANT_ID,
+) -> None:
+    with identity_context(tenant_id=tenant_id, user_id=user_id):
+        _run_query_graph_in_context(
+            session_id,
+            user_query,
+            knowledge_base_id,
+            is_stream,
+            user_id,
+            tenant_id,
+        )
+
+
+def _run_query_graph_in_context(
     session_id: str,
     user_query: str,
     knowledge_base_id: str = DEFAULT_KNOWLEDGE_BASE_ID,

@@ -17,7 +17,7 @@ from app.db.models import (
     Tenant,
     User,
 )
-from app.db.session import session_scope
+from app.db.session import apply_postgres_rls_context, session_scope
 
 
 ENTERPRISE_ROLES = {
@@ -39,21 +39,38 @@ def resolve_oidc_membership(
 ) -> tuple[User, Membership, Tenant] | None:
     """Resolve an OIDC subject to its server-owned active tenant context."""
     with session_scope() as session:
-        row = session.execute(
-            select(User, Membership, Tenant)
-            .join(Membership, Membership.user_id == User.id)
-            .join(Tenant, Tenant.id == Membership.tenant_id)
-            .where(
+        user = session.scalar(
+            select(User).where(
                 User.oidc_issuer == issuer,
                 User.external_identity_id == subject,
                 User.enabled.is_(True),
+            )
+        )
+        if user is None:
+            return None
+        apply_postgres_rls_context(
+            session.connection(),
+            {
+                "tenant_id": user.tenant_id,
+                "user_id": user.id,
+                "oidc_subject": subject,
+                "oidc_issuer": issuer,
+            },
+        )
+        membership = session.scalar(
+            select(Membership)
+            .where(
+                Membership.tenant_id == user.tenant_id,
+                Membership.user_id == user.id,
                 Membership.enabled.is_(True),
-                Tenant.enabled.is_(True),
             )
             .order_by(Membership.created_at.asc())
             .limit(1)
-        ).one_or_none()
-        return (row[0], row[1], row[2]) if row else None
+        )
+        tenant = session.get(Tenant, user.tenant_id)
+        if membership is None or tenant is None or not tenant.enabled:
+            return None
+        return user, membership, tenant
 
 
 def get_active_membership(user_id: str, tenant_id: str) -> Membership | None:

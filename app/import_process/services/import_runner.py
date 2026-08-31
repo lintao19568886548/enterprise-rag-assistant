@@ -6,7 +6,10 @@ from app.core.logger import logger
 from app.core.metrics import IMPORT_TASKS
 from app.core.errors import classify_exception
 from app.core.settings import settings
+from app.core.tenant_context import identity_context
 from app.db.repositories import (
+    DEFAULT_TENANT_ID,
+    DEFAULT_USER_ID,
     get_document,
     get_import_task,
     replace_chunk_metadata,
@@ -56,7 +59,18 @@ def _safe_error_summary(exc: Exception) -> str:
     return message[:1024]
 
 
-def run_import_graph(task_id: str, local_dir: str, local_file_path: str) -> None:
+def run_import_graph(
+    task_id: str,
+    local_dir: str,
+    local_file_path: str,
+    tenant_id: str = DEFAULT_TENANT_ID,
+    user_id: str = DEFAULT_USER_ID,
+) -> None:
+    with identity_context(tenant_id=tenant_id, user_id=user_id):
+        _run_import_graph_in_context(task_id, local_dir, local_file_path)
+
+
+def _run_import_graph_in_context(task_id: str, local_dir: str, local_file_path: str) -> None:
     try:
         if get_task_status(task_id) == TASK_STATUS_CANCELLED:
             return

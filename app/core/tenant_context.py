@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from contextvars import ContextVar, Token
+from contextlib import contextmanager
+from collections.abc import Iterator
 from dataclasses import dataclass
 
 
@@ -56,3 +58,23 @@ def current_identity_context() -> dict[str, str | None]:
         "oidc_subject": _oidc_subject.get(),
         "oidc_issuer": _oidc_issuer.get(),
     }
+
+
+@contextmanager
+def identity_context(
+    *,
+    tenant_id: str | None,
+    user_id: str | None,
+    oidc_subject: str | None = None,
+    oidc_issuer: str | None = None,
+) -> Iterator[None]:
+    tokens = set_identity_context(
+        tenant_id=tenant_id,
+        user_id=user_id,
+        oidc_subject=oidc_subject,
+        oidc_issuer=oidc_issuer,
+    )
+    try:
+        yield
+    finally:
+        reset_identity_context(tokens)
