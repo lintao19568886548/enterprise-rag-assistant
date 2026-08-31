@@ -8,9 +8,11 @@ def _production_settings(**overrides):
     values = {
         "app_env": "production",
         "auth_enabled": True,
-        "admin_api_keys": "a" * 32,
-        "user_api_keys": "u" * 32,
-        "readonly_api_keys": "r" * 32,
+        "oidc_enabled": True,
+        "oidc_issuer_url": "https://id.example.com/realms/enterprise",
+        "oidc_client_id": "enterprise-rag-assistant",
+        "oidc_audience": "enterprise-rag-api",
+        "oidc_allowed_algorithms": "RS256",
         "redis_enabled": True,
         "task_backend": "redis",
         "task_queue_enabled": True,
@@ -36,6 +38,7 @@ def test_development_defaults_are_safe_and_explicit():
     assert "*" not in config.cors_origins
     assert config.task_backend == "memory"
     assert config.auth_enabled is False
+    assert config.oidc_enabled is False
     assert config.knowledge_base_filter_enabled is True
 
 
@@ -65,8 +68,9 @@ def test_production_accepts_explicit_enterprise_dependencies():
     ("override", "expected_message"),
     [
         ({"database_url": "sqlite:///data/app.db"}, "SQLite is forbidden"),
-        ({"admin_api_keys": "short"}, "at least 32 characters"),
-        ({"user_api_keys": "a" * 32}, "cannot be reused across roles"),
+        ({"oidc_enabled": False}, "OIDC_ENABLED must be true"),
+        ({"oidc_audience": None}, "OIDC_ISSUER_URL, OIDC_CLIENT_ID"),
+        ({"oidc_allowed_algorithms": "HS256"}, "secure asymmetric algorithms"),
         ({"minio_enabled": False}, "MINIO_ENABLED must be true"),
     ],
 )

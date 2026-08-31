@@ -14,6 +14,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 
 from app.clients.mongo_history_utils import clear_history, get_recent_messages
+from app.api.admin_router import router as admin_router
 from app.api.knowledge_router import router as knowledge_router
 from app.core.errors import AppError, ErrorCode, classify_exception
 from app.core.health import create_health_router
@@ -72,6 +73,7 @@ app.add_middleware(
 install_common_api_features(app, "query")
 app.include_router(create_health_router("query"))
 app.include_router(knowledge_router)
+app.include_router(admin_router)
 
 
 @app.get("/chat.html", response_class=FileResponse)

@@ -42,10 +42,73 @@ class User(TimestampMixin, Base):
         ForeignKey("tenants.id", ondelete="RESTRICT"), nullable=False
     )
     username: Mapped[str] = mapped_column(String(128), unique=True, nullable=False)
+    email: Mapped[str | None] = mapped_column(String(320))
+    display_name: Mapped[str | None] = mapped_column(String(255))
     password_hash: Mapped[str | None] = mapped_column(String(255))
+    oidc_issuer: Mapped[str | None] = mapped_column(String(1024))
     external_identity_id: Mapped[str | None] = mapped_column(String(255), unique=True)
     role: Mapped[str] = mapped_column(String(32), default="user", nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+
+class Department(TimestampMixin, Base):
+    __tablename__ = "departments"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "name", name="uq_department_tenant_name"),
+        Index("ix_departments_tenant_enabled", "tenant_id", "enabled"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    tenant_id: Mapped[str] = mapped_column(
+        ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    parent_id: Mapped[str | None] = mapped_column(
+        ForeignKey("departments.id", ondelete="SET NULL")
+    )
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+
+class Membership(TimestampMixin, Base):
+    __tablename__ = "memberships"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "user_id", name="uq_membership_tenant_user"),
+        Index("ix_memberships_tenant_role", "tenant_id", "role"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    tenant_id: Mapped[str] = mapped_column(
+        ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    department_id: Mapped[str | None] = mapped_column(
+        ForeignKey("departments.id", ondelete="SET NULL")
+    )
+    role: Mapped[str] = mapped_column(String(32), default="viewer", nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+
+class ServiceAccount(TimestampMixin, Base):
+    __tablename__ = "service_accounts"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "name", name="uq_service_account_tenant_name"),
+        Index("ix_service_accounts_tenant_enabled", "tenant_id", "enabled"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    tenant_id: Mapped[str] = mapped_column(
+        ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    secret_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    role: Mapped[str] = mapped_column(String(32), default="viewer", nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class KnowledgeBase(TimestampMixin, Base):
@@ -63,6 +126,33 @@ class KnowledgeBase(TimestampMixin, Base):
     embedding_model: Mapped[str] = mapped_column(String(255), nullable=False)
     collection_name: Mapped[str] = mapped_column(String(255), nullable=False)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class KnowledgeBaseGrant(Base):
+    __tablename__ = "knowledge_base_grants"
+    __table_args__ = (
+        UniqueConstraint(
+            "knowledge_base_id",
+            "subject_type",
+            "subject_id",
+            "permission",
+            name="uq_kb_grant_subject_permission",
+        ),
+        Index("ix_kb_grants_tenant_kb", "tenant_id", "knowledge_base_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    tenant_id: Mapped[str] = mapped_column(
+        ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    knowledge_base_id: Mapped[str] = mapped_column(
+        ForeignKey("knowledge_bases.id", ondelete="CASCADE"), nullable=False
+    )
+    subject_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    subject_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    permission: Mapped[str] = mapped_column(String(32), nullable=False)
+    granted_by: Mapped[str | None] = mapped_column(String(128))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class Document(TimestampMixin, Base):
@@ -96,6 +186,9 @@ class DocumentVersion(Base):
     __table_args__ = (UniqueConstraint("document_id", "version", name="uq_document_version"),)
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    tenant_id: Mapped[str] = mapped_column(
+        ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
     document_id: Mapped[str] = mapped_column(ForeignKey("documents.id", ondelete="CASCADE"), nullable=False)
     version: Mapped[int] = mapped_column(Integer, nullable=False)
     content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -184,6 +277,9 @@ class ChatMessage(Base):
     __table_args__ = (Index("ix_chat_messages_session_created", "session_id", "created_at"),)
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    tenant_id: Mapped[str] = mapped_column(
+        ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
     session_id: Mapped[str] = mapped_column(ForeignKey("chat_sessions.id", ondelete="CASCADE"), nullable=False)
     role: Mapped[str] = mapped_column(String(32), nullable=False)
     text: Mapped[str] = mapped_column(Text, nullable=False)
@@ -204,6 +300,9 @@ class ProductAlias(Base):
     __table_args__ = (UniqueConstraint("knowledge_base_id", "normalized_alias", name="uq_kb_product_alias"),)
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    tenant_id: Mapped[str] = mapped_column(
+        ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
     knowledge_base_id: Mapped[str] = mapped_column(
         ForeignKey("knowledge_bases.id", ondelete="CASCADE"), nullable=False
     )
@@ -230,4 +329,27 @@ class OperationLog(Base):
     resource_id: Mapped[str | None] = mapped_column(String(128))
     details: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     request_id: Mapped[str | None] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class AuditLog(Base):
+    __tablename__ = "audit_logs"
+    __table_args__ = (
+        Index("ix_audit_logs_tenant_created", "tenant_id", "created_at"),
+        Index("ix_audit_logs_event_outcome", "event_type", "outcome"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    tenant_id: Mapped[str] = mapped_column(
+        ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    actor_id: Mapped[str | None] = mapped_column(String(128))
+    actor_type: Mapped[str] = mapped_column(String(32), default="user", nullable=False)
+    event_type: Mapped[str] = mapped_column(String(128), nullable=False)
+    outcome: Mapped[str] = mapped_column(String(32), nullable=False)
+    resource_type: Mapped[str | None] = mapped_column(String(128))
+    resource_id: Mapped[str | None] = mapped_column(String(128))
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    request_id: Mapped[str | None] = mapped_column(String(64))
+    trace_id: Mapped[str | None] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

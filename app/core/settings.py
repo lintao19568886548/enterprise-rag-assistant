@@ -28,7 +28,7 @@ class Settings(BaseSettings):
         populate_by_name=True,
     )
 
-    app_env: Literal["development", "test", "production"] = "development"
+    app_env: Literal["development", "test", "staging", "production"] = "development"
     app_name: str = "Enterprise Knowledge Base"
     api_host: str = "127.0.0.1"
     import_service_port: int = Field(default=8000, ge=1, le=65535)
@@ -50,6 +50,14 @@ class Settings(BaseSettings):
     cors_allow_credentials: bool = False
 
     auth_enabled: bool = False
+    oidc_enabled: bool = False
+    oidc_issuer_url: str | None = None
+    oidc_client_id: str | None = None
+    oidc_audience: str | None = None
+    oidc_jwks_cache_seconds: int = Field(default=300, ge=30, le=86400)
+    oidc_allowed_algorithms: str = "RS256"
+    oidc_clock_skew_seconds: int = Field(default=30, ge=0, le=300)
+    oidc_http_timeout_seconds: float = Field(default=5.0, gt=0, le=30)
     admin_api_keys: SecretStr | None = None
     user_api_keys: SecretStr | None = None
     readonly_api_keys: SecretStr | None = None
@@ -179,6 +187,14 @@ class Settings(BaseSettings):
         return self.app_env == "production"
 
     @property
+    def oidc_algorithms(self) -> list[str]:
+        return [
+            value.strip().upper()
+            for value in self.oidc_allowed_algorithms.split(",")
+            if value.strip()
+        ]
+
+    @property
     def cors_origins(self) -> list[str]:
         return [value.strip() for value in self.cors_allowed_origins.split(",") if value.strip()]
 
@@ -247,10 +263,16 @@ class Settings(BaseSettings):
                 missing.append("MINIO_ACCESS_KEY")
             if not self.minio_secret_key:
                 missing.append("MINIO_SECRET_KEY")
-        if self.auth_enabled and not any(
-            (self.admin_api_keys, self.user_api_keys, self.readonly_api_keys)
-        ):
-            missing.append("at least one role API key")
+        if self.auth_enabled:
+            if self.oidc_enabled:
+                if not self.oidc_issuer_url:
+                    missing.append("OIDC_ISSUER_URL")
+                if not self.oidc_client_id:
+                    missing.append("OIDC_CLIENT_ID")
+                if not self.oidc_audience:
+                    missing.append("OIDC_AUDIENCE")
+            elif not any((self.admin_api_keys, self.user_api_keys, self.readonly_api_keys)):
+                missing.append("OIDC configuration or at least one development API key")
         if missing:
             raise ValueError(f"{service} service missing required configuration: {', '.join(missing)}")
 
@@ -265,28 +287,24 @@ class Settings(BaseSettings):
             key_length = len(raw_checkpoint_key.encode("utf-8"))
             if key_length not in {16, 24, 32}:
                 raise ValueError("LANGGRAPH_AES_KEY must be 16, 24, or 32 UTF-8 bytes")
+        secure_oidc_algorithms = {"RS256", "RS384", "RS512", "ES256", "ES384", "ES512"}
+        if self.oidc_enabled:
+            if not self.oidc_issuer_url or not self.oidc_client_id or not self.oidc_audience:
+                raise ValueError(
+                    "OIDC_ISSUER_URL, OIDC_CLIENT_ID, and OIDC_AUDIENCE are required "
+                    "when OIDC_ENABLED=true"
+                )
+            if not self.oidc_algorithms or not set(self.oidc_algorithms).issubset(
+                secure_oidc_algorithms
+            ):
+                raise ValueError("OIDC_ALLOWED_ALGORITHMS must contain only secure asymmetric algorithms")
         if self.is_production:
             if "*" in self.cors_origins:
                 raise ValueError("CORS wildcard is forbidden in production")
             if not self.auth_enabled:
                 raise ValueError("AUTH_ENABLED must be true in production")
-            role_keys = {
-                role: self.api_keys_for_role(role)
-                for role in ("admin", "user", "readonly")
-            }
-            if any(not keys for keys in role_keys.values()):
-                raise ValueError(
-                    "ADMIN_API_KEYS, USER_API_KEYS, and READONLY_API_KEYS are required "
-                    "in production"
-                )
-            if any(len(key) < 32 for keys in role_keys.values() for key in keys):
-                raise ValueError("Production API keys must be at least 32 characters")
-            key_owners: dict[str, str] = {}
-            for role, keys in role_keys.items():
-                for key in keys:
-                    previous_role = key_owners.setdefault(key, role)
-                    if previous_role != role:
-                        raise ValueError("Production API keys cannot be reused across roles")
+            if not self.oidc_enabled:
+                raise ValueError("OIDC_ENABLED must be true in production")
             if self.task_backend == "memory":
                 raise ValueError("TASK_BACKEND=memory is forbidden in production")
             if not self.redis_enabled:

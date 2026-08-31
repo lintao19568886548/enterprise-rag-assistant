@@ -17,6 +17,7 @@ from app.clients.redis_utils import get_async_redis_client
 from app.core.errors import ErrorCode, install_exception_handlers
 from app.core.logger import logger
 from app.core.settings import settings
+from app.core.tenant_context import clear_identity_context
 
 REQUEST_COUNT = Counter(
     "kb_http_requests_total",
@@ -36,12 +37,19 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
         self.service_name = service_name
 
     async def dispatch(self, request: Request, call_next):
+        clear_identity_context()
         request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
+        trace_id = request.headers.get("X-Trace-ID") or request_id
         request.state.request_id = request_id
+        request.state.trace_id = trace_id
         start = time.perf_counter()
-        response = await call_next(request)
+        try:
+            response = await call_next(request)
+        finally:
+            clear_identity_context()
         elapsed = time.perf_counter() - start
         response.headers["X-Request-ID"] = request_id
+        response.headers["X-Trace-ID"] = trace_id
         route = request.scope.get("route")
         path = getattr(route, "path", request.url.path)
         REQUEST_COUNT.labels(

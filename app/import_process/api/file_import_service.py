@@ -15,6 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
 from app.api.knowledge_router import router as knowledge_router
+from app.api.admin_router import router as admin_router
 from app.clients.minio_utils import get_minio_client
 from app.core.errors import AppError, ErrorCode
 from app.core.health import create_health_router
@@ -85,6 +86,7 @@ app.add_middleware(
 install_common_api_features(app, "import")
 app.include_router(create_health_router("import"))
 app.include_router(knowledge_router)
+app.include_router(admin_router)
 
 
 @app.get("/import.html", response_class=FileResponse)
