@@ -1,8 +1,9 @@
+import time
 
 from app.clients.milvus_utils import create_hybrid_search_requests, get_milvus_client, hybrid_search
 from app.conf.milvus_config import milvus_config
 from app.core.settings import settings
-from app.core.metrics import RETRIEVAL_RESULTS
+from app.core.metrics import MILVUS_RETRIEVAL_LATENCY, RETRIEVAL_RESULTS
 from app.lm.embedding_utils import generate_embeddings
 from app.query_process.agent.node_base import NodeBase
 from app.core.logger import logger
@@ -102,15 +103,25 @@ class NodeSearchEmbedding(NodeBase):
             # 6、执行混合向量检索
             logger.info("开始执行 Milvus 混合检索...")
             client = get_milvus_client()
-            res = hybrid_search(
-                client=client,
-                collection_name=collection_name,  # 检索的目标集合名（文本片段向量集合）
-                reqs=reqs,  # 构造好的混合搜索请求对象（稠密+稀疏）
-                ranker_weights=(0.8, 0.2),  # 稠/稀疏向量评分权重配比，各占50%（可按业务调优）
-                norm_score=True,  # 开启评分归一化，将距离值转为0-1区间的相似度评分
-                limit=settings.retrieval_top_k,
-                output_fields=CHUNK_OUTPUT_FIELDS,
-            )
+            started = time.perf_counter()
+            status = "success"
+            try:
+                res = hybrid_search(
+                    client=client,
+                    collection_name=collection_name,  # 检索的目标集合名（文本片段向量集合）
+                    reqs=reqs,  # 构造好的混合搜索请求对象（稠密+稀疏）
+                    ranker_weights=(0.8, 0.2),  # 稠/稀疏向量评分权重配比，各占50%（可按业务调优）
+                    norm_score=True,  # 开启评分归一化，将距离值转为0-1区间的相似度评分
+                    limit=settings.retrieval_top_k,
+                    output_fields=CHUNK_OUTPUT_FIELDS,
+                )
+            except Exception:
+                status = "error"
+                raise
+            finally:
+                MILVUS_RETRIEVAL_LATENCY.labels("hybrid", status).observe(
+                    time.perf_counter() - started
+                )
 
             # 7、构造并返回结果：若检索结果非空，取res[0]，否则返回空列表
             logger.info("普通混合检索完成，结果数={}", len(res[0]) if res else 0)

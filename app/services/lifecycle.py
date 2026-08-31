@@ -12,6 +12,7 @@ from minio.deleteobjects import DeleteObject
 from app.clients.milvus_utils import get_milvus_client
 from app.clients.minio_utils import get_minio_client
 from app.core.logger import logger
+from app.core.metrics import CLEANUP_EVENTS
 from app.core.settings import PROJECT_ROOT, settings
 from app.core.tenant_context import identity_context
 from app.db.identity_repositories import add_audit_log
@@ -181,6 +182,16 @@ def process_cleanup_event(
     stage_handlers: dict[str, Callable[[DocumentCleanupContext], None]] | None = None,
 ) -> OutboxEvent:
     """Execute or resume a cleanup event; completed stages are never repeated."""
+    with logger.contextualize(tenant_id=tenant_id, cleanup_job_id=event_id):
+        return _process_cleanup_event(event_id, tenant_id, stage_handlers=stage_handlers)
+
+
+def _process_cleanup_event(
+    event_id: str,
+    tenant_id: str,
+    *,
+    stage_handlers: dict[str, Callable[[DocumentCleanupContext], None]] | None = None,
+) -> OutboxEvent:
     current = get_cleanup_event(event_id, tenant_id)
     if current is None:
         raise LookupError("cleanup event not found")
@@ -210,6 +221,7 @@ def process_cleanup_event(
                 handlers[stage](context)
                 event = record_cleanup_stage(event_id, tenant_id, stage)
             _audit_stage(context, event, stage, "success")
+            CLEANUP_EVENTS.labels("success", stage).inc()
         except Exception as exc:
             code, summary = _safe_error(stage, exc)
             failed = mark_cleanup_failure(
@@ -219,6 +231,7 @@ def process_cleanup_event(
                 error_summary=summary,
             )
             _audit_stage(context, failed, stage, "failure")
+            CLEANUP_EVENTS.labels("failure", stage).inc()
             logger.error(
                 "Cleanup job {} stage {} failed with {}",
                 event_id,

@@ -13,6 +13,8 @@ from fastapi import Depends, Header, Request
 from fastapi.concurrency import run_in_threadpool
 
 from app.core.errors import AppError, ErrorCode
+from app.core.logger import logger
+from app.core.metrics import AUTH_EVENTS
 from app.core.oidc import OIDCTokenError, decode_oidc_token
 from app.core.settings import settings
 from app.core.tenant_context import set_identity_context
@@ -153,6 +155,18 @@ def _unauthorized(message: str = "身份认证失败") -> AppError:
     return AppError(ErrorCode.PERMISSION_DENIED, message, status_code=401)
 
 
+def _record_auth(method: str, outcome: str, reason: str, principal: Principal | None = None) -> None:
+    safe_reason = reason if reason in {"ok", "invalid", "disabled", "missing", "forbidden"} else "invalid"
+    AUTH_EVENTS.labels(method, outcome, safe_reason).inc()
+    logger.bind(
+        event_type=f"login.{outcome}",
+        authentication_method=method,
+        reason=safe_reason,
+        tenant_id=getattr(principal, "tenant_id", None),
+        user_id=getattr(principal, "user_id", None),
+    ).info("authentication_event")
+
+
 async def _authenticate(
     request: Request,
     authorization: str | None,
@@ -169,10 +183,12 @@ async def _authenticate(
     elif authorization:
         scheme, _, token = authorization.partition(" ")
         if scheme.lower() != "bearer" or not token or not settings.oidc_enabled:
+            _record_auth("oidc", "failure", "invalid")
             raise _unauthorized()
         try:
             oidc_claims = await run_in_threadpool(decode_oidc_token, token)
         except OIDCTokenError as exc:
+            _record_auth("oidc", "failure", "invalid")
             raise _unauthorized() from exc
         set_identity_context(
             tenant_id=None,
@@ -186,9 +202,11 @@ async def _authenticate(
             oidc_claims.subject,
         )
         if identity is None:
+            _record_auth("oidc", "failure", "disabled")
             raise _unauthorized("当前企业身份尚未开通或已被禁用")
         user, membership, tenant = identity
         if membership.role not in ENTERPRISE_ROLES:
+            _record_auth("oidc", "failure", "forbidden")
             raise _unauthorized("当前企业角色无效")
         principal = Principal(
             subject=oidc_claims.subject,
@@ -206,9 +224,11 @@ async def _authenticate(
         if candidate is None and not settings.is_production:
             candidate = _resolve_legacy_api_key(x_api_key)
         if candidate is None:
+            _record_auth("service_account", "failure", "invalid")
             raise _unauthorized()
         principal = candidate
     else:
+        _record_auth("unknown", "failure", "missing")
         raise _unauthorized("缺少 Bearer Token 或服务账户密钥")
 
     set_identity_context(
@@ -229,8 +249,10 @@ async def _authenticate(
             principal.tenant_id,
         )
         if user_record is None or not user_record.enabled or membership_record is None:
+            _record_auth(principal.authentication_method, "failure", "disabled", principal)
             raise _unauthorized("当前身份已被禁用")
     request.state.principal = principal
+    _record_auth(principal.authentication_method, "success", "ok", principal)
     return principal
 
 
@@ -242,6 +264,7 @@ def require_permission(permission: Permission):
     ) -> Principal:
         principal = await _authenticate(request, authorization, x_api_key)
         if not principal.has_permission(permission):
+            _record_auth(principal.authentication_method, "failure", "forbidden", principal)
             raise AppError(
                 ErrorCode.PERMISSION_DENIED,
                 "当前身份没有执行该操作的权限",

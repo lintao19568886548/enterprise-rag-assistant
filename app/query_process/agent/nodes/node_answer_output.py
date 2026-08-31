@@ -10,6 +10,7 @@ from app.clients.mongo_history_utils import save_chat_message
 from app.clients.minio_utils import presign_minio_uri
 from app.core.load_prompt import load_prompt
 from app.core.logger import logger
+from app.core.metrics import RAG_CITATIONS, RAG_CONFIDENCE, RAG_EVIDENCE
 from app.core.settings import settings
 from app.lm.lm_utils import get_llm_client
 from app.query_process.agent.node_base import NodeBase
@@ -253,6 +254,12 @@ class NodeAnswerOutput(NodeBase):
         return images
 
     def _persist_task_result(self, state: QueryGraphState) -> None:
+        confidence = float(state.get("confidence") or 0.0)
+        citations = len(state.get("citations") or [])
+        sufficient = bool(state.get("has_sufficient_evidence"))
+        RAG_CONFIDENCE.observe(confidence)
+        RAG_CITATIONS.observe(citations)
+        RAG_EVIDENCE.labels(str(sufficient).lower()).inc()
         for key, value in self._response_payload(state).items():
             set_task_result(state["session_id"], key, value)
 

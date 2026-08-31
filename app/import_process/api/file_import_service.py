@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import uvicorn
-from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
@@ -40,6 +40,7 @@ from app.db.repositories import (
     set_document_object_path,
     update_import_task,
 )
+from app.db.identity_repositories import add_audit_log
 from app.db.session import init_database
 from app.utils.path_util import PROJECT_ROOT
 from app.utils.task_utils import (
@@ -81,7 +82,14 @@ app.add_middleware(
     allow_origins=settings.cors_origins,
     allow_credentials=settings.cors_allow_credentials,
     allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
-    allow_headers=["Accept", "Authorization", "Content-Type", "X-API-Key", "X-Request-ID"],
+    allow_headers=[
+        "Accept",
+        "Authorization",
+        "Content-Type",
+        "X-API-Key",
+        "X-Request-ID",
+        "X-Trace-ID",
+    ],
 )
 install_common_api_features(app, "import")
 app.include_router(create_health_router("import"))
@@ -119,6 +127,28 @@ def _upload_to_minio(
     return object_name
 
 
+def _audit_request(
+    request: Request,
+    principal,
+    event_type: str,
+    resource_type: str,
+    resource_id: str,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    add_audit_log(
+        tenant_id=principal.tenant_id,
+        actor_id=principal.user_id,
+        actor_type="service_account" if principal.service_account_id else "user",
+        event_type=event_type,
+        outcome="success",
+        resource_type=resource_type,
+        resource_id=resource_id,
+        metadata=metadata,
+        request_id=getattr(request.state, "request_id", None),
+        trace_id=getattr(request.state, "trace_id", None),
+    )
+
+
 @app.post(
     "/upload",
     summary="安全上传文件并启动导入",
@@ -126,6 +156,7 @@ def _upload_to_minio(
 )
 async def upload_files(
     background_tasks: BackgroundTasks,
+    request: Request,
     principal: RequireEditor,
     files: list[UploadFile] = File(...),
     knowledge_base_id: str = Form(default=DEFAULT_KNOWLEDGE_BASE_ID),
@@ -267,6 +298,14 @@ async def upload_files(
                 "duplicate": False,
             }
         )
+        _audit_request(
+            request,
+            principal,
+            "document.import_requested",
+            "document",
+            document_id,
+            {"task_id": task_id, "document_version": document_version},
+        )
 
     return {
         "code": 200,
@@ -340,6 +379,7 @@ async def cancel_task(task_id: str, principal: RequireAdmin):
 async def retry_task(
     task_id: str,
     background_tasks: BackgroundTasks,
+    request: Request,
     principal: RequireAdmin,
 ):
     context = get_import_task_document(task_id)
@@ -412,6 +452,7 @@ async def retry_task(
             principal.tenant_id,
             principal.user_id,
         )
+    _audit_request(request, principal, "document.import_retry_requested", "import_task", task_id)
     return {"task_id": task_id, "status": TASK_STATUS_PENDING, "retried": True}
 
 
@@ -419,6 +460,7 @@ async def retry_task(
 async def rebuild_document(
     document_id: str,
     background_tasks: BackgroundTasks,
+    request: Request,
     principal: RequireAdmin,
 ):
     document = get_document(document_id)
@@ -506,6 +548,14 @@ async def rebuild_document(
             principal.tenant_id,
             principal.user_id,
         )
+    _audit_request(
+        request,
+        principal,
+        "document.rebuild_requested",
+        "document",
+        document.id,
+        {"task_id": task_id, "document_version": document.current_version},
+    )
     return {
         "task_id": task_id,
         "document_id": document.id,

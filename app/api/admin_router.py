@@ -26,7 +26,9 @@ from app.db.identity_repositories import (
     list_audit_logs,
     list_departments,
     list_memberships,
+    list_service_accounts,
     list_tenants,
+    revoke_service_account,
     update_membership,
 )
 
@@ -263,6 +265,10 @@ async def patch_member(
     except LookupError as exc:
         raise AppError(ErrorCode.RESOURCE_NOT_FOUND, "成员关系不存在", status_code=404) from exc
     _audit(request, principal, "membership.updated", "success", "membership", record.id)
+    if payload.enabled is False:
+        _audit(request, principal, "user.disabled", "success", "membership", record.id)
+    if payload.role is not None:
+        _audit(request, principal, "permission.changed", "success", "membership", record.id)
     return {
         "id": record.id,
         "tenant_id": record.tenant_id,
@@ -327,6 +333,43 @@ async def post_service_account(
         "api_key": f"sa_{record.id}_{raw_secret}",
         "warning": "此密钥只显示一次，请立即存入安全的密钥管理系统",
     }
+
+
+@router.get("/service-accounts")
+async def get_service_accounts(principal: RequireTenantAdmin):
+    return {
+        "items": [
+            {
+                "id": record.id,
+                "tenant_id": record.tenant_id,
+                "name": record.name,
+                "role": record.role,
+                "enabled": record.enabled,
+                "expires_at": record.expires_at,
+                "last_used_at": record.last_used_at,
+                "revoked_at": record.revoked_at,
+                "created_at": record.created_at,
+            }
+            for record in list_service_accounts(principal.tenant_id)
+        ]
+    }
+
+
+@router.delete("/service-accounts/{account_id}")
+async def delete_service_account(
+    account_id: str,
+    request: Request,
+    principal: RequireTenantAdmin,
+    confirm: bool = Query(default=False),
+):
+    if not confirm:
+        raise AppError(ErrorCode.VALIDATION_ERROR, "撤销服务账户必须传入 confirm=true", status_code=409)
+    try:
+        record = revoke_service_account(account_id, principal.tenant_id)
+    except LookupError as exc:
+        raise AppError(ErrorCode.RESOURCE_NOT_FOUND, "服务账户不存在", status_code=404) from exc
+    _audit(request, principal, "service_account.revoked", "success", "service_account", record.id)
+    return {"id": record.id, "revoked": True, "revoked_at": record.revoked_at}
 
 
 @router.get("/audit-logs")

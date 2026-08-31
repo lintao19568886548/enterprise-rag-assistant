@@ -16,6 +16,7 @@ def test_staging_compose_has_private_dependencies_and_independent_workers():
         "import-worker",
         "cleanup-worker",
         "evaluation-worker",
+        "prometheus",
         "postgres",
         "redis",
         "milvus",
@@ -35,3 +36,7 @@ def test_staging_compose_has_private_dependencies_and_independent_workers():
     assert services["minio"]["environment"]["MINIO_ROOT_PASSWORD"].startswith("${MINIO_SECRET_KEY:?")
     assert "minioadmin" not in raw
     assert "change-this" not in raw
+    assert services["prometheus"]["networks"] == ["backend"]
+    nginx = Path("deploy/nginx/nginx.staging.conf").read_text(encoding="utf-8")
+    assert nginx.count("location = /metrics") == 2
+    assert "return 404" in nginx

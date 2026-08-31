@@ -16,6 +16,7 @@ from starlette.responses import JSONResponse, Response
 from app.clients.redis_utils import get_async_redis_client
 from app.core.errors import ErrorCode, install_exception_handlers
 from app.core.logger import logger
+from app.core.metrics import WORKER_QUEUE_LENGTH
 from app.core.settings import settings
 from app.core.tenant_context import clear_identity_context
 
@@ -43,28 +44,31 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
         request.state.request_id = request_id
         request.state.trace_id = trace_id
         start = time.perf_counter()
-        try:
-            response = await call_next(request)
-        finally:
-            clear_identity_context()
-        elapsed = time.perf_counter() - start
-        response.headers["X-Request-ID"] = request_id
-        response.headers["X-Trace-ID"] = trace_id
-        route = request.scope.get("route")
-        path = getattr(route, "path", request.url.path)
-        REQUEST_COUNT.labels(
-            self.service_name, request.method, path, str(response.status_code)
-        ).inc()
-        REQUEST_LATENCY.labels(self.service_name, request.method, path).observe(elapsed)
-        logger.info(
-            "[{}] {} {} -> {} ({:.1f} ms)",
-            request_id,
-            request.method,
-            path,
-            response.status_code,
-            elapsed * 1000,
-        )
-        return response
+        with logger.contextualize(request_id=request_id, trace_id=trace_id):
+            try:
+                response = await call_next(request)
+                elapsed = time.perf_counter() - start
+                response.headers["X-Request-ID"] = request_id
+                response.headers["X-Trace-ID"] = trace_id
+                route = request.scope.get("route")
+                path = getattr(route, "path", request.url.path)
+                REQUEST_COUNT.labels(
+                    self.service_name, request.method, path, str(response.status_code)
+                ).inc()
+                REQUEST_LATENCY.labels(self.service_name, request.method, path).observe(elapsed)
+                principal = getattr(request.state, "principal", None)
+                logger.bind(
+                    tenant_id=getattr(principal, "tenant_id", None),
+                    user_id=getattr(principal, "user_id", None),
+                    service=self.service_name,
+                    http_method=request.method,
+                    http_path=path,
+                    http_status=response.status_code,
+                    latency_ms=round(elapsed * 1000, 2),
+                ).info("http_request_completed")
+                return response
+            finally:
+                clear_identity_context()
 
 
 class InMemoryRateLimitMiddleware(BaseHTTPMiddleware):
@@ -149,4 +153,16 @@ def install_common_api_features(app: FastAPI, service_name: str) -> None:
 
     @app.get("/metrics", include_in_schema=False)
     async def metrics() -> Response:
+        if settings.redis_enabled:
+            redis = get_async_redis_client()
+            for queue in ("import", "cleanup", "evaluation"):
+                try:
+                    length = await cast(Awaitable[Any], redis.llen(queue))
+                    WORKER_QUEUE_LENGTH.labels(queue).set(int(length))
+                except Exception as exc:
+                    logger.warning(
+                        "Queue metric refresh failed, queue={}, error={}",
+                        queue,
+                        exc.__class__.__name__,
+                    )
         return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)

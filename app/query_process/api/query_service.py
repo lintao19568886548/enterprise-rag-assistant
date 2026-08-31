@@ -69,7 +69,14 @@ app.add_middleware(
     allow_origins=settings.cors_origins,
     allow_credentials=settings.cors_allow_credentials,
     allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
-    allow_headers=["Accept", "Authorization", "Content-Type", "X-API-Key", "X-Request-ID"],
+    allow_headers=[
+        "Accept",
+        "Authorization",
+        "Content-Type",
+        "X-API-Key",
+        "X-Request-ID",
+        "X-Trace-ID",
+    ],
 )
 install_common_api_features(app, "query")
 app.include_router(create_health_router("query"))
@@ -267,14 +274,20 @@ def run_query_graph(
     tenant_id: str = DEFAULT_TENANT_ID,
 ) -> None:
     with identity_context(tenant_id=tenant_id, user_id=user_id):
-        _run_query_graph_in_context(
-            session_id,
-            user_query,
-            knowledge_base_id,
-            is_stream,
-            user_id,
-            tenant_id,
-        )
+        with logger.contextualize(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            session_id=session_id,
+            knowledge_base_id=knowledge_base_id,
+        ):
+            _run_query_graph_in_context(
+                session_id,
+                user_query,
+                knowledge_base_id,
+                is_stream,
+                user_id,
+                tenant_id,
+            )
 
 
 def _run_query_graph_in_context(

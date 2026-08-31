@@ -25,6 +25,7 @@ from app.db.lifecycle_repositories import (
     request_document_deletion,
     retry_cleanup_event,
 )
+from app.db.identity_repositories import add_audit_log
 from app.db.repositories import (
     DEFAULT_KNOWLEDGE_BASE_ID,
     add_operation_log,
@@ -54,6 +55,29 @@ class KnowledgeBaseCreate(BaseModel):
     name: str = Field(min_length=1, max_length=255)
     description: str = Field(default="", max_length=4000)
     permission_scope: Literal["private", "department", "public"] = "private"
+
+
+def _audit(
+    request: Request,
+    principal,
+    event_type: str,
+    resource_type: str,
+    resource_id: str,
+    *,
+    metadata: dict | None = None,
+) -> None:
+    add_audit_log(
+        tenant_id=principal.tenant_id,
+        actor_id=principal.user_id,
+        actor_type="service_account" if principal.service_account_id else "user",
+        event_type=event_type,
+        outcome="success",
+        resource_type=resource_type,
+        resource_id=resource_id,
+        metadata=metadata,
+        request_id=getattr(request.state, "request_id", None),
+        trace_id=getattr(request.state, "trace_id", None),
+    )
 
 
 def _knowledge_base_payload(record) -> dict:
@@ -161,6 +185,7 @@ async def create_kb(payload: KnowledgeBaseCreate, request: Request, principal: R
         request_id=getattr(request.state, "request_id", None),
         tenant_id=principal.tenant_id,
     )
+    _audit(request, principal, "knowledge_base.created", "knowledge_base", record.id)
     return _knowledge_base_payload(record)
 
 
@@ -256,6 +281,7 @@ async def delete_kb(
         request_id=getattr(request.state, "request_id", None),
         tenant_id=principal.tenant_id,
     )
+    _audit(request, principal, "knowledge_base.deleted", "knowledge_base", knowledge_base_id)
     return {
         "id": knowledge_base_id,
         "deleted": True,
@@ -370,6 +396,14 @@ async def delete_document_endpoint(
         request_id=getattr(request.state, "request_id", None),
         tenant_id=principal.tenant_id,
     )
+    _audit(
+        request,
+        principal,
+        "document.delete_requested",
+        "document",
+        document_id,
+        metadata={"cleanup_job_id": cleanup_event.id, "created": created},
+    )
     return {
         "id": document_id,
         "accepted": True,
@@ -403,6 +437,7 @@ async def get_cleanup_job(event_id: str, principal: RequireAdmin):
 async def retry_cleanup_job(
     event_id: str,
     background_tasks: BackgroundTasks,
+    request: Request,
     principal: RequireAdmin,
 ):
     existing = get_cleanup_event(event_id, principal.tenant_id)
@@ -416,6 +451,7 @@ async def retry_cleanup_job(
         raise AppError(ErrorCode.RESOURCE_NOT_FOUND, "清理任务不存在", status_code=404) from exc
     if event.status != "COMPLETED":
         _dispatch_cleanup(background_tasks, event.id, principal.tenant_id, principal.user_id)
+    _audit(request, principal, "document.cleanup_retried", "cleanup_job", event.id)
     return _cleanup_event_payload(event)
 
 
@@ -435,6 +471,7 @@ async def rebuild_document_version(
     document_id: str,
     version_number: int,
     background_tasks: BackgroundTasks,
+    request: Request,
     principal: RequireAdmin,
 ):
     document = get_document(document_id)
@@ -522,6 +559,15 @@ async def rebuild_document_version(
             principal.tenant_id,
             principal.user_id,
         )
+    operation = "document.version_rollback_requested" if request.url.path.endswith("/rollback") else "document.version_activation_requested"
+    _audit(
+        request,
+        principal,
+        operation,
+        "document_version",
+        target.id,
+        metadata={"document_id": document.id, "version": target.version, "task_id": task_id},
+    )
     current = next((item for item in versions if item.is_active), None)
     return {
         "task_id": task_id,

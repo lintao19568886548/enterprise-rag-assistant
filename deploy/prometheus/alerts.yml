@@ -1,0 +1,33 @@
+groups:
+  - name: enterprise-rag
+    rules:
+      - alert: EnterpriseRagApiErrorRateHigh
+        expr: sum(rate(kb_http_requests_total{status=~"5.."}[5m])) / clamp_min(sum(rate(kb_http_requests_total[5m])), 1) > 0.05
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: Enterprise RAG API 5xx rate exceeds 5 percent
+      - alert: EnterpriseRagApiP95Slow
+        expr: histogram_quantile(0.95, sum by (le, service) (rate(kb_http_request_duration_seconds_bucket[5m]))) > 5
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: Enterprise RAG API P95 latency exceeds 5 seconds
+      - alert: EnterpriseRagWorkerBacklog
+        expr: kb_worker_queue_length > 100
+        for: 15m
+        labels: {severity: warning}
+        annotations:
+          summary: Enterprise RAG worker queue is backlogged
+      - alert: EnterpriseRagModelTimeouts
+        expr: sum(rate(kb_model_calls_total{status="timeout"}[10m])) > 0.05
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: Enterprise RAG model timeout rate is elevated
+      - alert: EnterpriseRagCleanupDeadLetter
+        expr: increase(kb_cleanup_events_total{status="failure"}[15m]) > 0
+        for: 1m
+        labels: {severity: critical}
+        annotations:
+          summary: A document cleanup stage failed

@@ -227,6 +227,25 @@ services:
       timeout: 10s
       retries: 5
 
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=30d
+    volumes:
+      - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./deploy/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus-data:/prometheus
+    expose: ["9090"]
+    networks: [backend]
+    depends_on:
+      import-api:
+        condition: service_healthy
+      query-api:
+        condition: service_healthy
+    restart: unless-stopped
+
   nginx:
     image: nginx:1.27-alpine
     volumes:
@@ -263,4 +282,5 @@ volumes:
   minio-data:
   model-cache:
   postgres-data:
+  prometheus-data:
   redis-data:

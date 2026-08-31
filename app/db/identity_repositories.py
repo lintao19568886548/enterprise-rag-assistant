@@ -312,6 +312,29 @@ def create_service_account(
         return record
 
 
+def list_service_accounts(tenant_id: str) -> list[ServiceAccount]:
+    with session_scope() as session:
+        return list(
+            session.scalars(
+                select(ServiceAccount)
+                .where(ServiceAccount.tenant_id == tenant_id)
+                .order_by(ServiceAccount.created_at.desc())
+            )
+        )
+
+
+def revoke_service_account(account_id: str, tenant_id: str) -> ServiceAccount:
+    with session_scope() as session:
+        record = session.get(ServiceAccount, account_id)
+        if record is None or record.tenant_id != tenant_id:
+            raise LookupError("service account not found")
+        if record.revoked_at is None:
+            record.revoked_at = datetime.now(UTC)
+            record.enabled = False
+        session.flush()
+        return record
+
+
 def touch_service_account(account_id: str) -> None:
     with session_scope() as session:
         record = session.get(ServiceAccount, account_id)
@@ -332,6 +355,8 @@ def add_audit_log(
     request_id: str | None = None,
     trace_id: str | None = None,
 ) -> None:
+    from app.core.metrics import AUDIT_EVENTS
+
     with session_scope() as session:
         session.add(
             AuditLog(
@@ -347,6 +372,7 @@ def add_audit_log(
                 trace_id=trace_id,
             )
         )
+    AUDIT_EVENTS.labels(event_type, outcome).inc()
 
 
 def list_audit_logs(tenant_id: str, limit: int = 100) -> list[AuditLog]:

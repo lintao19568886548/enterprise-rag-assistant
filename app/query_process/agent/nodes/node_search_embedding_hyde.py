@@ -1,8 +1,10 @@
+import time
+
 from app.clients.milvus_utils import create_hybrid_search_requests, get_milvus_client, hybrid_search
 from app.conf.milvus_config import milvus_config
 from app.core.load_prompt import load_prompt
 from app.core.settings import settings
-from app.core.metrics import RETRIEVAL_RESULTS
+from app.core.metrics import MILVUS_RETRIEVAL_LATENCY, RETRIEVAL_RESULTS
 from app.lm.embedding_utils import generate_embeddings
 from app.lm.lm_utils import get_llm_client
 from app.query_process.agent.node_base import NodeBase
@@ -171,15 +173,25 @@ class NodeSearchEmbeddingHyde(NodeBase):
             # 6、执行混合向量检索
             logger.info("步骤2: 开始执行 Milvus 混合检索...")
             client = get_milvus_client()
-            res = hybrid_search(
-                client=client,
-                collection_name=collection_name,
-                reqs=reqs,
-                ranker_weights=ranker_weights,
-                norm_score=norm_score,
-                limit=top_k,
-                output_fields=list(output_fields or CHUNK_OUTPUT_FIELDS),
-            )
+            started = time.perf_counter()
+            status = "success"
+            try:
+                res = hybrid_search(
+                    client=client,
+                    collection_name=collection_name,
+                    reqs=reqs,
+                    ranker_weights=ranker_weights,
+                    norm_score=norm_score,
+                    limit=top_k,
+                    output_fields=list(output_fields or CHUNK_OUTPUT_FIELDS),
+                )
+            except Exception:
+                status = "error"
+                raise
+            finally:
+                MILVUS_RETRIEVAL_LATENCY.labels("hyde", status).observe(
+                    time.perf_counter() - started
+                )
             RETRIEVAL_RESULTS.labels("hyde").observe(len(res[0]) if res else 0)
 
             return res

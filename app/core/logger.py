@@ -49,18 +49,41 @@ _SECRET_VALUES = tuple(
         settings.reveal(settings.mineru_api_token),
         settings.reveal(settings.minio_access_key),
         settings.reveal(settings.minio_secret_key),
+        settings.reveal(settings.admin_api_keys),
+        settings.reveal(settings.user_api_keys),
+        settings.reveal(settings.readonly_api_keys),
+        settings.reveal(settings.langgraph_aes_key),
     )
     if value
 )
-_SECRET_PATTERN = re.compile(r"(?i)(?:sk-[a-z0-9_-]{12,}|bearer\s+[a-z0-9._-]{12,})")
+_SECRET_PATTERN = re.compile(
+    r"(?i)(?:sk-[a-z0-9_-]{12,}|bearer\s+[a-z0-9._~+/=-]{12,}|eyj[a-z0-9._~-]{20,})"
+)
+_NAMED_SECRET_PATTERN = re.compile(
+    r"(?i)\b(authorization|cookie|set-cookie|x-api-key|api[_-]?key|token|password|secret)"
+    r"(\s*[:=]\s*)([^\s,;}&]+)"
+)
+_URL_CREDENTIAL_PATTERN = re.compile(r"(?i)([a-z][a-z0-9+.-]*://[^:/\s]+:)([^@/\s]+)(@)")
+
+
+def redact_log_text(value: object) -> str:
+    message = str(value)
+    for secret in _SECRET_VALUES:
+        message = message.replace(secret, "***REDACTED***")
+    message = _SECRET_PATTERN.sub("***REDACTED***", message)
+    message = _NAMED_SECRET_PATTERN.sub(r"\1\2***REDACTED***", message)
+    return _URL_CREDENTIAL_PATTERN.sub(r"\1***REDACTED***\3", message)
 
 
 def _redact_record(record):
     """Remove configured credentials and common token forms before writing."""
-    message = str(record["message"])
-    for secret in _SECRET_VALUES:
-        message = message.replace(secret, "***REDACTED***")
-    record["message"] = _SECRET_PATTERN.sub("***REDACTED***", message)
+    record["message"] = redact_log_text(record["message"])
+    record["extra"] = {
+        key: redact_log_text(value) if isinstance(value, str) else value
+        for key, value in record["extra"].items()
+    }
+    if settings.app_env in {"staging", "production"} and not settings.log_sensitive_content:
+        record["exception"] = None
     return True
 
 # -------------------------- 第五步：初始化日志配置（核心方法） --------------------------

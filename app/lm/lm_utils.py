@@ -25,6 +25,16 @@ MODEL_LATENCY = Histogram(
     "Model gateway latency",
     ("model", "mode"),
 )
+MODEL_TOKENS = Counter(
+    "kb_model_tokens_total",
+    "Tokens reported by the model provider",
+    ("model", "direction"),
+)
+MODEL_COST = Counter(
+    "kb_model_estimated_cost_usd_total",
+    "Estimated model cost from configured per-million-token rates",
+    ("model",),
+)
 
 
 @dataclass
@@ -97,6 +107,29 @@ def _record_failure(model: str) -> None:
             logger.warning("模型熔断器已打开，model={}，failures={}", model, state.failures)
 
 
+def _usage_metadata(response: Any) -> tuple[int, int]:
+    usage = getattr(response, "usage_metadata", None) or {}
+    return int(usage.get("input_tokens") or 0), int(usage.get("output_tokens") or 0)
+
+
+def _record_usage(model: str, input_tokens: int, output_tokens: int) -> None:
+    if input_tokens:
+        MODEL_TOKENS.labels(model, "input").inc(input_tokens)
+    if output_tokens:
+        MODEL_TOKENS.labels(model, "output").inc(output_tokens)
+    estimated_cost = (
+        input_tokens * settings.model_input_cost_per_1m_tokens
+        + output_tokens * settings.model_output_cost_per_1m_tokens
+    ) / 1_000_000
+    if estimated_cost:
+        MODEL_COST.labels(model).inc(estimated_cost)
+
+
+def _failure_status(exc: Exception) -> str:
+    marker = f"{exc.__class__.__name__} {exc}".lower()
+    return "timeout" if "timeout" in marker or "timed out" in marker else "error"
+
+
 class ModelGateway:
     """Small compatibility wrapper exposing the invoke/stream methods used by the graphs."""
 
@@ -121,12 +154,13 @@ class ModelGateway:
             try:
                 response = _get_raw_client(model, self.json_mode).invoke(input_data, **kwargs)
                 _record_success(model)
+                _record_usage(model, *_usage_metadata(response))
                 MODEL_CALLS.labels(model, "invoke", "success").inc()
                 return response
             except Exception as exc:
                 last_error = exc
                 _record_failure(model)
-                MODEL_CALLS.labels(model, "invoke", "error").inc()
+                MODEL_CALLS.labels(model, "invoke", _failure_status(exc)).inc()
                 logger.warning("模型调用失败，model={}，error={}", model, exc.__class__.__name__)
             finally:
                 MODEL_LATENCY.labels(model, "invoke").observe(time.perf_counter() - started)
@@ -139,17 +173,23 @@ class ModelGateway:
                 continue
             started = time.perf_counter()
             emitted = False
+            input_tokens = 0
+            output_tokens = 0
             try:
                 for chunk in _get_raw_client(model, self.json_mode).stream(input_data, **kwargs):
                     emitted = True
+                    chunk_input, chunk_output = _usage_metadata(chunk)
+                    input_tokens = max(input_tokens, chunk_input)
+                    output_tokens = max(output_tokens, chunk_output)
                     yield chunk
                 _record_success(model)
+                _record_usage(model, input_tokens, output_tokens)
                 MODEL_CALLS.labels(model, "stream", "success").inc()
                 return
             except Exception as exc:
                 last_error = exc
                 _record_failure(model)
-                MODEL_CALLS.labels(model, "stream", "error").inc()
+                MODEL_CALLS.labels(model, "stream", _failure_status(exc)).inc()
                 logger.warning("模型流式调用失败，model={}，error={}", model, exc.__class__.__name__)
                 if emitted:
                     raise RuntimeError("stream interrupted after partial output") from exc

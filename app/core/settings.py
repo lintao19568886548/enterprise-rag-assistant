@@ -82,6 +82,8 @@ class Settings(BaseSettings):
     model_max_retries: int = Field(default=2, ge=0, le=10)
     model_circuit_breaker_failures: int = Field(default=5, ge=1, le=100)
     model_circuit_breaker_reset_seconds: int = Field(default=30, ge=1, le=3600)
+    model_input_cost_per_1m_tokens: float = Field(default=0.0, ge=0.0)
+    model_output_cost_per_1m_tokens: float = Field(default=0.0, ge=0.0)
     llm_allowed_models: str = ""
     llm_fallback_models: str = ""
 
