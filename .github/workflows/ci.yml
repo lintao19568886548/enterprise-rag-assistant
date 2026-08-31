@@ -79,6 +79,7 @@ jobs:
           path: |
             coverage.xml
             evaluation/reports/ci-offline.json
+            evaluation/reports/ci-offline.md
 
   postgres-rls:
     runs-on: ubuntu-latest
