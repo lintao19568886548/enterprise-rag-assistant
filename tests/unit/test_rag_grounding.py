@@ -7,10 +7,11 @@ from app.utils.milvus_utils import build_chunk_filter
 def test_milvus_filter_escapes_user_values_and_scopes_knowledge_base():
     expression = build_chunk_filter(
         ['device "A"'],
+        "tenant-123",
         "kb-123",
-        enforce_knowledge_base=True,
     )
     assert 'item_name in ["device \\"A\\""]' in expression
+    assert 'tenant_id == "tenant-123"' in expression
     assert 'knowledge_base_id == "kb-123"' in expression
     assert "is_active == true" in expression
 

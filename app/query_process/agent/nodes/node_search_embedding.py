@@ -19,6 +19,7 @@ CHUNK_OUTPUT_FIELDS = [
     "file_title",
     "file_name",
     "item_name",
+    "tenant_id",
     "knowledge_base_id",
     "document_id",
     "document_version",
@@ -81,8 +82,8 @@ class NodeSearchEmbedding(NodeBase):
             # 4、所有用户影响的值都先转义；生产环境强制知识库隔离。
             expr = build_chunk_filter(
                 item_names,
+                state.get("tenant_id"),
                 state.get("knowledge_base_id"),
-                enforce_knowledge_base=True,
             )
             logger.info(
                 "检索过滤已构建，商品数量={}，知识库隔离={}",

@@ -57,6 +57,7 @@ class NodeSearchEmbeddingHyde(NodeBase):
                 rewritten_query=rewritten_query,
                 hyde_doc=hyde_doc,
                 item_names=item_names,
+                tenant_id=state.get("tenant_id"),
                 knowledge_base_id=state.get("knowledge_base_id"),
                 top_k=settings.retrieval_top_k,
             )
@@ -106,6 +107,7 @@ class NodeSearchEmbeddingHyde(NodeBase):
             rewritten_query: str,
             hyde_doc: str,
             item_names=None,
+            tenant_id: str | None = None,
             knowledge_base_id: str | None = None,
             req_limit: int | None = None,
             top_k: int = 5,
@@ -149,8 +151,8 @@ class NodeSearchEmbeddingHyde(NodeBase):
             # 4、构建安全的商品/知识库过滤表达式。
             expr = build_chunk_filter(
                 item_names,
+                tenant_id,
                 knowledge_base_id,
-                enforce_knowledge_base=True,
             )
             logger.info(
                 "HyDE 检索过滤已构建，商品数量={}，知识库隔离={}",

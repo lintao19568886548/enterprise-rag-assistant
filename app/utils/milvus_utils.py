@@ -40,19 +40,43 @@ def escape_milvus_string(value: Union[str, None]) -> str:
 
 def build_chunk_filter(
     item_names: list[str] | None,
+    tenant_id: str | None,
     knowledge_base_id: str | None,
-    *,
-    enforce_knowledge_base: bool,
-) -> str | None:
-    """Build a Milvus expression from escaped, server-controlled fields."""
-    clauses: list[str] = []
+) -> str:
+    """Build the mandatory tenant/knowledge-base/active chunk filter."""
+    clauses = [build_scope_filter(tenant_id, knowledge_base_id)]
     if item_names:
         values = [f'"{escape_milvus_string(value)}"' for value in item_names if str(value).strip()]
         if values:
             clauses.append(f"item_name in [{', '.join(values)}]")
-    if enforce_knowledge_base:
-        if not knowledge_base_id:
-            raise ValueError("knowledge_base_id is required when knowledge-base filtering is enabled")
-        clauses.append(f'knowledge_base_id == "{escape_milvus_string(knowledge_base_id)}"')
+    return " and ".join(clauses)
+
+
+def build_scope_filter(
+    tenant_id: str | None,
+    knowledge_base_id: str | None,
+    *,
+    document_id: str | None = None,
+    item_name: str | None = None,
+    active_only: bool = True,
+) -> str:
+    """Create a filter solely from trusted identifiers; raw expressions are never accepted."""
+    if not tenant_id or not str(tenant_id).strip():
+        raise ValueError("tenant_id is required for every Milvus operation")
+    if not knowledge_base_id or not str(knowledge_base_id).strip():
+        raise ValueError("knowledge_base_id is required for every Milvus operation")
+    clauses = [
+        f'tenant_id == "{escape_milvus_string(tenant_id)}"',
+        f'knowledge_base_id == "{escape_milvus_string(knowledge_base_id)}"',
+    ]
+    if active_only:
         clauses.append("is_active == true")
-    return " and ".join(clauses) if clauses else None
+    if document_id is not None:
+        if not str(document_id).strip():
+            raise ValueError("document_id cannot be blank")
+        clauses.append(f'document_id == "{escape_milvus_string(document_id)}"')
+    if item_name is not None:
+        if not str(item_name).strip():
+            raise ValueError("item_name cannot be blank")
+        clauses.append(f'item_name == "{escape_milvus_string(item_name)}"')
+    return " and ".join(clauses)

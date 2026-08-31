@@ -30,7 +30,7 @@ from app.db.repositories import (
     soft_delete_document,
     soft_delete_knowledge_base,
 )
-from app.utils.milvus_utils import escape_milvus_string
+from app.utils.milvus_utils import build_scope_filter
 
 
 router = APIRouter(tags=["knowledge-base-management"])
@@ -162,15 +162,22 @@ async def delete_kb(
             client = get_milvus_client()
             if client is None:
                 raise RuntimeError("Milvus unavailable")
-            safe_id = escape_milvus_string(knowledge_base_id)
             client.delete(
                 collection_name=settings.milvus_collection,
-                filter=f'knowledge_base_id == "{safe_id}"',
+                filter=build_scope_filter(
+                    principal.tenant_id,
+                    knowledge_base_id,
+                    active_only=False,
+                ),
             )
             if client.has_collection(collection_name=settings.item_name_collection):
                 client.delete(
-                collection_name=settings.item_name_collection,
-                filter=f'knowledge_base_id == "{safe_id}"',
+                    collection_name=settings.item_name_collection,
+                    filter=build_scope_filter(
+                        principal.tenant_id,
+                        knowledge_base_id,
+                        active_only=False,
+                    ),
             )
         if settings.minio_enabled:
             minio_client = get_minio_client()
@@ -281,10 +288,14 @@ async def delete_document_endpoint(
         raise AppError(ErrorCode.MILVUS_UNAVAILABLE, "Milvus 当前不可用", status_code=503)
     if client is not None:
         try:
-            safe_id = escape_milvus_string(document_id)
             client.delete(
                 collection_name=settings.milvus_collection,
-                filter=f'document_id == "{safe_id}"',
+                filter=build_scope_filter(
+                    principal.tenant_id,
+                    record.knowledge_base_id,
+                    document_id=document_id,
+                    active_only=False,
+                ),
             )
         except Exception as exc:
             logger.opt(exception=True).error("文档 {} 的 Milvus 清理失败：{}", document_id, exc)

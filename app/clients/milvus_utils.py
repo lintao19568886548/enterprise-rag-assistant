@@ -18,6 +18,7 @@ CHUNK_METADATA_FIELDS: dict[str, tuple[DataType, dict[str, Any]]] = {
     "knowledge_base_id": (DataType.VARCHAR, {"max_length": 64}),
     "document_id": (DataType.VARCHAR, {"max_length": 64}),
     "document_version": (DataType.INT64, {}),
+    "task_id": (DataType.VARCHAR, {"max_length": 64}),
     "file_name": (DataType.VARCHAR, {"max_length": 1024}),
     "page_number": (DataType.INT64, {}),
     "section_title": (DataType.VARCHAR, {"max_length": 65535}),
@@ -35,6 +36,8 @@ ITEM_METADATA_FIELDS: dict[str, tuple[DataType, dict[str, Any]]] = {
     "tenant_id": (DataType.VARCHAR, {"max_length": 64}),
     "knowledge_base_id": (DataType.VARCHAR, {"max_length": 64}),
     "document_id": (DataType.VARCHAR, {"max_length": 64}),
+    "document_version": (DataType.INT64, {}),
+    "task_id": (DataType.VARCHAR, {"max_length": 64}),
     "is_active": (DataType.BOOL, {}),
 }
 
@@ -315,6 +318,8 @@ def fetch_chunks_by_chunk_ids(
         collection_name: str,
         chunk_ids,
         *,
+        tenant_id: str,
+        knowledge_base_id: str,
         output_fields=None,
         batch_size: int = 100,
 ):
@@ -353,19 +358,14 @@ def fetch_chunks_by_chunk_ids(
     for i in range(0, len(ok_ids), batch_size):
         batch = ok_ids[i: i + batch_size]
 
-        # 方式1：优先使用主键get方法查询（性能最优）
-        if hasattr(client, "get"):
-            try:
-                got = client.get(collection_name=collection_name, ids=batch, output_fields=output_fields)
-                if got:
-                    results.extend(got)
-                continue
-            except Exception as e:
-                logger.warning(f"Milvus get方法查询失败，将回退至query方法：{str(e)}")
-
-        # 方式2：get方法失败，回退使用filter过滤查询
+        # 主键 get 无法附加租户过滤，因此统一使用服务端构造的 query 表达式。
         try:
-            expr = f"chunk_id in [{', '.join(str(x) for x in batch)}]"
+            from app.utils.milvus_utils import build_scope_filter
+
+            expr = (
+                f"{build_scope_filter(tenant_id, knowledge_base_id)} and "
+                f"chunk_id in [{', '.join(str(x) for x in batch)}]"
+            )
             q = client.query(collection_name=collection_name, filter=expr, output_fields=output_fields)
             if q:
                 results.extend(q)
