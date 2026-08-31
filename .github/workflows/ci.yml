@@ -26,10 +26,54 @@ jobs:
         run: uv run python -m compileall -q app tests
       - name: Ruff
         run: uv run ruff check app tests
-      - name: Tests
+      - name: Mypy
+        run: uv run mypy app scripts tests
+      - name: Validate approved evaluation labels
+        run: >-
+          uv run python -m app.evaluation.run_eval
+          --dataset evaluation/rag_cases.phase1.jsonl
+          --validate-only
+      - name: Unit tests
         env:
           APP_ENV: test
           LOG_FILE_ENABLE: "False"
           LANGGRAPH_CHECKPOINTER: memory
-          DATABASE_URL: sqlite:///:memory:
-        run: uv run pytest -q --cov=app --cov-report=term-missing --cov-report=xml
+          DATABASE_URL: "sqlite:///:memory:"
+        run: uv run pytest tests/unit -q --cov=app --cov-report=term-missing --cov-report=xml
+      - name: API tests
+        env:
+          APP_ENV: test
+          LOG_FILE_ENABLE: "False"
+          LANGGRAPH_CHECKPOINTER: memory
+          DATABASE_URL: "sqlite:///:memory:"
+        run: uv run pytest tests/api -q
+      - name: Security isolation tests
+        env:
+          APP_ENV: test
+          LOG_FILE_ENABLE: "False"
+          LANGGRAPH_CHECKPOINTER: memory
+          DATABASE_URL: "sqlite:///:memory:"
+        run: >-
+          uv run pytest -q
+          tests/unit/test_oidc_security.py
+          tests/unit/test_tenant_acl.py
+          tests/unit/test_milvus_tenant_isolation.py
+          tests/unit/test_document_lifecycle.py
+          tests/api/test_query_acl.py
+      - name: Evaluation metric tests
+        run: uv run pytest tests/evaluation -q
+      - name: Approved offline evaluation gate
+        run: >-
+          uv run python -m app.evaluation.run_eval
+          --dataset evaluation/rag_cases.phase1.jsonl
+          --responses evaluation/offline_responses.phase1.jsonl
+          --gate-profile pr
+          --output evaluation/reports/ci-offline.json
+      - name: Upload quality reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: quality-reports
+          path: |
+            coverage.xml
+            evaluation/reports/ci-offline.json

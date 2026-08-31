@@ -1,4 +1,33 @@
-from app.evaluation.run_eval import _percentile, evaluate_response, validate_cases
+import json
+from pathlib import Path
+
+from app.evaluation.run_eval import (
+    _percentile,
+    evaluate_gates,
+    evaluate_response,
+    validate_cases,
+)
+
+
+def _approved_case(**overrides):
+    case = {
+        "id": "approved",
+        "category": "fact",
+        "question": "问题",
+        "confirmation": "",
+        "expected_answer_keywords": [],
+        "expected_sources": [],
+        "expected_pages": [],
+        "should_refuse": False,
+        "tenant_id": "tenant-a",
+        "knowledge_base_id": "kb-a",
+        "label_status": "approved",
+        "approval_status": "approved",
+        "approved_by": "expert",
+        "approved_at": "2026-08-31T00:00:00+08:00",
+    }
+    case.update(overrides)
+    return case
 
 
 def test_grounded_evaluation_metrics_pass_with_valid_citation():
@@ -35,8 +64,15 @@ def test_percentile_uses_nearest_rank():
 def test_pending_gold_slots_are_counted_but_need_no_fake_question():
     validation = validate_cases(
         [
-            {"id": "approved", "question": "问题", "label_status": "approved"},
-            {"id": "pending", "question": "", "label_status": "needs_human_label"},
+            _approved_case(),
+            {
+                "id": "pending",
+                "question": "",
+                "label_status": "needs_human_label",
+                "approval_status": "needs_human_label",
+                "approved_by": None,
+                "approved_at": None,
+            },
         ]
     )
     assert validation["approved"] == 1
@@ -45,7 +81,75 @@ def test_pending_gold_slots_are_counted_but_need_no_fake_question():
 
 
 def test_approved_gold_slot_requires_a_question():
-    validation = validate_cases(
-        [{"id": "bad", "question": "", "label_status": "approved"}]
-    )
+    validation = validate_cases([_approved_case(id="bad", question="")])
     assert validation["errors"]
+
+
+def test_hit_mrr_and_tenant_scope_are_measured():
+    case = _approved_case(
+        expected_sources=["manual"],
+        expected_answer_keywords=["220v"],
+    )
+    result = evaluate_response(
+        case,
+        {
+            "answer": "220V [1]",
+            "has_sufficient_evidence": True,
+            "citations": [
+                {"title": "noise", "chunk_id": "1"},
+                {
+                    "title": "manual",
+                    "chunk_id": "2",
+                    "tenant_id": "tenant-a",
+                    "knowledge_base_id": "kb-a",
+                },
+            ],
+        },
+    )
+    assert result["hit_at_k"] == 1.0
+    assert result["mrr"] == 0.5
+    assert result["citation_validity"] == 1.0
+
+    leaked = evaluate_response(
+        case,
+        {
+            "answer": "220V [1]",
+            "has_sufficient_evidence": True,
+            "citations": [
+                {
+                    "title": "manual",
+                    "chunk_id": "2",
+                    "tenant_id": "tenant-b",
+                    "knowledge_base_id": "kb-a",
+                }
+            ],
+        },
+    )
+    assert leaked["citation_validity"] == 0.0
+    assert leaked["passed"] is False
+
+
+def test_release_gate_requires_approved_security_cases():
+    summary = {
+        "p95_latency_ms": 100,
+        "metrics": {
+            "citation_validity": 1.0,
+            "answer_pass_rate": 1.0,
+            "unanswerable_accuracy": 1.0,
+            "phase1_approved_regression": 1.0,
+            "model_failure_rate": 0.0,
+            "permission_isolation": None,
+            "prompt_injection_containment": None,
+        },
+    }
+    assert evaluate_gates(summary, "pr")["passed"] is True
+    assert evaluate_gates(summary, "release")["passed"] is False
+
+
+def test_phase1_dataset_keeps_30_approved_and_70_pending():
+    dataset = Path("evaluation/rag_cases.phase1.jsonl")
+    cases = [json.loads(line) for line in dataset.read_text(encoding="utf-8").splitlines()]
+    validation = validate_cases(cases)
+    assert validation["approved"] == 30
+    assert validation["pending"] == 70
+    assert validation["errors"] == []
