@@ -6,7 +6,7 @@ import hashlib
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, func, select, update
 
 from app.core.settings import settings
 from app.db.models import (
@@ -698,10 +698,55 @@ def get_recent_messages(
                 "citations": record.citations,
                 "model": record.model,
                 "latency_ms": record.latency_ms,
+                "feedback": record.feedback,
                 "ts": record.created_at.timestamp() if record.created_at else None,
             }
             for record in records
         ]
+
+
+def set_message_feedback(
+    message_id: str,
+    feedback: str,
+    *,
+    tenant_id: str,
+    user_id: str,
+) -> ChatMessage:
+    if feedback not in {"helpful", "unhelpful", "cleared"}:
+        raise ValueError("invalid feedback")
+    with session_scope() as session:
+        record = session.scalar(
+            select(ChatMessage)
+            .join(ChatSession, ChatSession.id == ChatMessage.session_id)
+            .where(
+                ChatMessage.id == message_id,
+                ChatMessage.tenant_id == tenant_id,
+                ChatMessage.role == "assistant",
+                ChatSession.user_id == user_id,
+            )
+        )
+        if record is None:
+            raise LookupError("assistant message not found")
+        record.feedback = None if feedback == "cleared" else feedback
+        session.flush()
+        return record
+
+
+def get_feedback_statistics(tenant_id: str) -> dict[str, int]:
+    with session_scope() as session:
+        rows = session.execute(
+            select(ChatMessage.feedback, func.count(ChatMessage.id))
+            .where(
+                ChatMessage.tenant_id == tenant_id,
+                ChatMessage.role == "assistant",
+                ChatMessage.feedback.is_not(None),
+            )
+            .group_by(ChatMessage.feedback)
+        ).all()
+    counts = {str(feedback): int(count) for feedback, count in rows}
+    helpful = counts.get("helpful", 0)
+    unhelpful = counts.get("unhelpful", 0)
+    return {"helpful": helpful, "unhelpful": unhelpful, "total": helpful + unhelpful}
 
 
 def clear_history(

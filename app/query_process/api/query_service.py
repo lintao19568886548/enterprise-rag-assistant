@@ -32,7 +32,9 @@ from app.db.repositories import (
     get_accessible_knowledge_base,
     get_chat_session,
     get_import_task_document,
+    set_message_feedback,
 )
+from app.db.identity_repositories import add_audit_log
 from app.db.session import init_database
 from app.query_process.agent.kb_query_workflow import get_default_query_workflow
 from app.query_process.agent.state import create_default_state
@@ -176,6 +178,10 @@ class QueryRequest(BaseModel):
         return value
 
 
+class FeedbackRequest(BaseModel):
+    feedback: str = Field(pattern=r"^(helpful|unhelpful|cleared)$")
+
+
 @app.post("/query")
 async def query(
     background_tasks: BackgroundTasks,
@@ -261,6 +267,7 @@ async def query(
         ),
         "model": get_task_result(session_id, "model", ""),
         "latency_ms": get_task_result(session_id, "latency_ms", 0),
+        "message_id": get_task_result(session_id, "message_id", ""),
         "done_list": [],
     }
 
@@ -381,6 +388,7 @@ async def history(
                     "citations": record.get("citations", []),
                     "model": record.get("model"),
                     "latency_ms": record.get("latency_ms"),
+                    "feedback": record.get("feedback"),
                     "ts": record.get("ts"),
                 }
                 for record in records
@@ -391,6 +399,38 @@ async def history(
     except Exception as exc:
         logger.opt(exception=True).error("[{}] 历史记录读取失败：{}", session_id, exc)
         raise AppError(ErrorCode.INTERNAL_ERROR, "历史记录读取失败", status_code=503) from exc
+
+
+@app.post("/messages/{message_id}/feedback")
+async def submit_feedback(
+    message_id: str,
+    payload: FeedbackRequest,
+    request: Request,
+    principal: RequireUser,
+):
+    try:
+        record = await run_in_threadpool(
+            set_message_feedback,
+            message_id,
+            payload.feedback,
+            tenant_id=principal.tenant_id,
+            user_id=principal.user_id,
+        )
+    except LookupError as exc:
+        raise AppError(ErrorCode.RESOURCE_NOT_FOUND, "回答消息不存在", status_code=404) from exc
+    add_audit_log(
+        tenant_id=principal.tenant_id,
+        actor_id=principal.user_id,
+        actor_type="user",
+        event_type="answer.feedback_updated",
+        outcome="success",
+        resource_type="chat_message",
+        resource_id=record.id,
+        metadata={"feedback": record.feedback or "cleared"},
+        request_id=getattr(request.state, "request_id", None),
+        trace_id=getattr(request.state, "trace_id", None),
+    )
+    return {"message_id": record.id, "feedback": record.feedback}
 
 
 @app.delete("/history/{session_id}")

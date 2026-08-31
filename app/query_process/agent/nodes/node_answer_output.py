@@ -60,10 +60,10 @@ class NodeAnswerOutput(NodeBase):
             else []
         )
         state["image_urls"] = image_urls
-        self._persist_task_result(state)
         # Item-name confirmation already persisted its own assistant response.
         if state.get("answer") and not answer_was_preexisting:
-            self._write_history(state)
+            state["message_id"] = self._write_history(state)
+        self._persist_task_result(state)
 
         add_done_task(state["session_id"], self.name, state.get("is_stream"))
         if state.get("is_stream"):
@@ -274,12 +274,13 @@ class NodeAnswerOutput(NodeBase):
             "has_sufficient_evidence": state.get("has_sufficient_evidence", False),
             "model": state.get("model") or "",
             "latency_ms": state.get("latency_ms", 0),
+            "message_id": state.get("message_id") or "",
         }
 
     @staticmethod
-    def _write_history(state: QueryGraphState) -> None:
+    def _write_history(state: QueryGraphState) -> str | None:
         try:
-            save_chat_message(
+            return save_chat_message(
                 session_id=state["session_id"],
                 role="assistant",
                 text=state.get("answer") or "",
@@ -294,3 +295,4 @@ class NodeAnswerOutput(NodeBase):
             )
         except Exception as exc:
             logger.warning("对话历史写入失败，不影响本次回答：{}", exc.__class__.__name__)
+            return None

@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import secrets
+import json
 from typing import Literal
 
 from fastapi import APIRouter, Query, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
+from prometheus_client import REGISTRY
 
 from app.core.errors import AppError, ErrorCode
 from app.core.security import (
@@ -15,7 +17,7 @@ from app.core.security import (
     RequireTenantAdmin,
     hash_service_account_secret,
 )
-from app.core.settings import settings
+from app.core.settings import PROJECT_ROOT, settings
 from app.db.identity_repositories import (
     add_audit_log,
     create_department,
@@ -26,10 +28,19 @@ from app.db.identity_repositories import (
     list_audit_logs,
     list_departments,
     list_memberships,
+    list_knowledge_base_grants,
     list_service_accounts,
     list_tenants,
     revoke_service_account,
+    revoke_knowledge_base_grant,
     update_membership,
+)
+from app.db.lifecycle_repositories import list_cleanup_events
+from app.db.repositories import (
+    get_feedback_statistics,
+    list_documents,
+    list_import_tasks,
+    list_knowledge_bases,
 )
 
 
@@ -308,6 +319,43 @@ async def post_grant(
     }
 
 
+@router.get("/knowledge-base-grants")
+async def get_grants(principal: RequireTenantAdmin):
+    return {
+        "items": [
+            {
+                "id": record.id,
+                "tenant_id": record.tenant_id,
+                "knowledge_base_id": record.knowledge_base_id,
+                "subject_type": record.subject_type,
+                "subject_id": record.subject_id,
+                "permission": record.permission,
+                "granted_by": record.granted_by,
+                "created_at": record.created_at,
+            }
+            for record in list_knowledge_base_grants(principal.tenant_id)
+        ]
+    }
+
+
+@router.delete("/knowledge-base-grants/{grant_id}")
+async def delete_grant(
+    grant_id: str,
+    request: Request,
+    principal: RequireTenantAdmin,
+    confirm: bool = Query(default=False),
+):
+    if not confirm:
+        raise AppError(ErrorCode.VALIDATION_ERROR, "撤销授权必须传入 confirm=true", status_code=409)
+    try:
+        record = revoke_knowledge_base_grant(grant_id, principal.tenant_id)
+    except LookupError as exc:
+        raise AppError(ErrorCode.RESOURCE_NOT_FOUND, "授权不存在", status_code=404) from exc
+    _audit(request, principal, "knowledge_base.grant_revoked", "success", "knowledge_base", record.knowledge_base_id)
+    _audit(request, principal, "permission.changed", "success", "knowledge_base_grant", record.id)
+    return {"id": record.id, "revoked": True}
+
+
 @router.post("/service-accounts", status_code=201)
 async def post_service_account(
     payload: ServiceAccountCreate,
@@ -395,4 +443,67 @@ async def get_audit_logs(
             }
             for record in list_audit_logs(principal.tenant_id, limit)
         ]
+    }
+
+
+def _evaluation_summary() -> dict:
+    dataset_path = PROJECT_ROOT / "evaluation" / "rag_cases.phase1.jsonl"
+    report_path = PROJECT_ROOT / "evaluation" / "reports" / "offline-phase2.json"
+    labels = {"approved": 0, "needs_human_label": 0, "other": 0}
+    if dataset_path.is_file():
+        for line in dataset_path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            record = json.loads(line)
+            status = str(record.get("label_status") or record.get("approval_status") or "other")
+            labels[status if status in labels else "other"] += 1
+    report = json.loads(report_path.read_text(encoding="utf-8")) if report_path.is_file() else {}
+    return {
+        "labels": labels,
+        "report": {
+            "dataset_version": report.get("dataset_version"),
+            "evaluation_mode": report.get("evaluation_mode", "offline_scorer_contract"),
+            "total": report.get("total"),
+            "passed": report.get("passed"),
+            "pass_rate": report.get("pass_rate"),
+            "p50_latency_ms": report.get("p50_latency_ms"),
+            "p95_latency_ms": report.get("p95_latency_ms"),
+            "metrics": report.get("metrics") or {},
+            "gates": report.get("gates"),
+        },
+    }
+
+
+def _metric_value(name: str, labels: dict[str, str] | None = None) -> float:
+    return float(REGISTRY.get_sample_value(name, labels or {}) or 0.0)
+
+
+@router.get("/workbench-summary")
+async def get_workbench_summary(principal: RequireTenantAdmin):
+    knowledge_bases = list_knowledge_bases(principal.tenant_id)
+    documents = [item for kb in knowledge_bases for item in list_documents(kb.id)]
+    model = settings.llm_model
+    feedback = get_feedback_statistics(principal.tenant_id)
+    return {
+        "tenant_id": principal.tenant_id,
+        "counts": {
+            "knowledge_bases": len(knowledge_bases),
+            "documents": len(documents),
+            "memberships": len(list_memberships(principal.tenant_id)),
+            "departments": len(list_departments(principal.tenant_id)),
+            "import_tasks": len(list_import_tasks(500, tenant_id=principal.tenant_id)),
+            "cleanup_jobs": len(list_cleanup_events(principal.tenant_id, 500)),
+            "audit_events": len(list_audit_logs(principal.tenant_id, 500)),
+        },
+        "model": {
+            "name": model,
+            "input_tokens": _metric_value("kb_model_tokens_total", {"model": model, "direction": "input"}),
+            "output_tokens": _metric_value("kb_model_tokens_total", {"model": model, "direction": "output"}),
+            "estimated_cost_usd": _metric_value("kb_model_estimated_cost_usd_total", {"model": model}),
+            "input_cost_per_1m_tokens": settings.model_input_cost_per_1m_tokens,
+            "output_cost_per_1m_tokens": settings.model_output_cost_per_1m_tokens,
+            "scope": "current API process; Prometheus is the cross-service source of truth",
+        },
+        "feedback": feedback,
+        "evaluation": _evaluation_summary(),
     }

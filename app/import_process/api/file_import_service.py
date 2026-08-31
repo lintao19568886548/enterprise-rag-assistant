@@ -105,6 +105,14 @@ async def get_import_page():
     return FileResponse(path=html_path, media_type="text/html")
 
 
+@app.get("/admin.html", response_class=FileResponse)
+async def get_admin_page():
+    html_path = PROJECT_ROOT / "app" / "import_process" / "page" / "admin.html"
+    if not html_path.exists():
+        raise HTTPException(status_code=404, detail="admin.html page not found")
+    return FileResponse(path=html_path, media_type="text/html")
+
+
 def _upload_to_minio(
     tenant_id: str,
     knowledge_base_id: str,

@@ -654,23 +654,42 @@
             // 文件大小格式化（KB，保留2位小数）
             const fileSize = (file.size / 1024).toFixed(2) + ' KB';
 
-            // 文件项HTML结构
-            fileItem.innerHTML = `
-                <div class="file-header">
-                    <div class="file-name"></div>
-                    <div class="file-size"></div>
-                    <div class="status-badge status-uploading">上传中...</div>
-                </div>
-                <div class="progress-container">
-                    <div class="progress-bar" style="width: 0%"></div>
-                </div>
-                <button class="logs-toggle">📜 查看系统日志</button>
-                <button class="task-action cancel" hidden>取消任务</button>
-                <button class="task-action retry" hidden>重试任务</button>
-                <div class="logs-container"></div>
-            `;
-            fileItem.querySelector('.file-name').textContent = file.name;
-            fileItem.querySelector('.file-size').textContent = `大小: ${fileSize}`;
+            // 全部使用 DOM API，避免把文件名等不可信内容交给 HTML 解析器。
+            const header = document.createElement('div');
+            header.className = 'file-header';
+            const fileNameEl = document.createElement('div');
+            fileNameEl.className = 'file-name';
+            fileNameEl.textContent = file.name;
+            const fileSizeEl = document.createElement('div');
+            fileSizeEl.className = 'file-size';
+            fileSizeEl.textContent = `大小: ${fileSize}`;
+            const status = document.createElement('div');
+            status.className = 'status-badge status-uploading';
+            status.textContent = '上传中...';
+            header.append(fileNameEl, fileSizeEl, status);
+            const progressContainer = document.createElement('div');
+            progressContainer.className = 'progress-container';
+            const progress = document.createElement('div');
+            progress.className = 'progress-bar';
+            progress.style.width = '0%';
+            progressContainer.appendChild(progress);
+            const logsButton = document.createElement('button');
+            logsButton.className = 'logs-toggle';
+            logsButton.type = 'button';
+            logsButton.textContent = '📜 查看系统日志';
+            const cancelButton = document.createElement('button');
+            cancelButton.className = 'task-action cancel';
+            cancelButton.type = 'button';
+            cancelButton.hidden = true;
+            cancelButton.textContent = '取消任务';
+            const retryButton = document.createElement('button');
+            retryButton.className = 'task-action retry';
+            retryButton.type = 'button';
+            retryButton.hidden = true;
+            retryButton.textContent = '重试任务';
+            const logs = document.createElement('div');
+            logs.className = 'logs-container';
+            fileItem.append(header, progressContainer, logsButton, cancelButton, retryButton, logs);
 
             // 添加到文件列表
             fileList.appendChild(fileItem);

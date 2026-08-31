@@ -246,6 +246,27 @@ def create_knowledge_base_grant(
         return record
 
 
+def list_knowledge_base_grants(tenant_id: str) -> list[KnowledgeBaseGrant]:
+    with session_scope() as session:
+        return list(
+            session.scalars(
+                select(KnowledgeBaseGrant)
+                .where(KnowledgeBaseGrant.tenant_id == tenant_id)
+                .order_by(KnowledgeBaseGrant.created_at.desc())
+            )
+        )
+
+
+def revoke_knowledge_base_grant(grant_id: str, tenant_id: str) -> KnowledgeBaseGrant:
+    with session_scope() as session:
+        record = session.get(KnowledgeBaseGrant, grant_id)
+        if record is None or record.tenant_id != tenant_id:
+            raise LookupError("knowledge base grant not found")
+        session.delete(record)
+        session.flush()
+        return record
+
+
 def has_knowledge_base_grant(
     *,
     tenant_id: str,
