@@ -64,3 +64,37 @@ RAG_EVIDENCE = Counter(
     "Answers with or without sufficient evidence",
     ("sufficient",),
 )
+EMBEDDING_CALLS = Counter(
+    "kb_embedding_calls_total",
+    "Embedding batches and their outcome",
+    ("status",),
+)
+EMBEDDING_LATENCY = Histogram(
+    "kb_embedding_duration_seconds",
+    "Embedding batch latency",
+)
+EMBEDDING_ITEMS = Counter(
+    "kb_embedding_items_total",
+    "Texts submitted for embedding",
+)
+QUERY_END_TO_END_LATENCY = Histogram(
+    "kb_query_end_to_end_duration_seconds",
+    "Complete LangGraph query latency including model time",
+    ("status",),
+)
+DATABASE_POOL_SIZE = Gauge(
+    "kb_database_pool_size",
+    "Configured SQLAlchemy database connection pool size",
+)
+DATABASE_POOL_CHECKED_OUT = Gauge(
+    "kb_database_pool_checked_out",
+    "SQLAlchemy database connections currently checked out",
+)
+DATABASE_POOL_OVERFLOW = Gauge(
+    "kb_database_pool_overflow",
+    "SQLAlchemy database pool overflow connections",
+)
+DATABASE_POOL_TIMEOUTS = Counter(
+    "kb_database_pool_timeouts_total",
+    "Database connection pool checkout timeouts",
+)

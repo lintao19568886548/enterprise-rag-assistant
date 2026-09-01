@@ -1,6 +1,12 @@
 groups:
   - name: enterprise-rag
     rules:
+      - alert: EnterpriseRagServiceUnavailable
+        expr: up{job=~"enterprise-rag-.+"} == 0
+        for: 2m
+        labels: {severity: critical}
+        annotations:
+          summary: Enterprise RAG service target is unavailable
       - alert: EnterpriseRagApiErrorRateHigh
         expr: sum(rate(kb_http_requests_total{status=~"5.."}[5m])) / clamp_min(sum(rate(kb_http_requests_total[5m])), 1) > 0.05
         for: 10m
@@ -19,6 +25,12 @@ groups:
         labels: {severity: warning}
         annotations:
           summary: Enterprise RAG worker queue is backlogged
+      - alert: EnterpriseRagOutboxBacklog
+        expr: kb_worker_queue_length{queue="cleanup"} > 25
+        for: 15m
+        labels: {severity: warning}
+        annotations:
+          summary: Document cleanup outbox queue is backlogged
       - alert: EnterpriseRagModelTimeouts
         expr: sum(rate(kb_model_calls_total{status="timeout"}[10m])) > 0.05
         for: 10m
@@ -31,3 +43,45 @@ groups:
         labels: {severity: critical}
         annotations:
           summary: A document cleanup stage failed
+      - alert: EnterpriseRagDatabasePoolExhausted
+        expr: kb_database_pool_checked_out >= (kb_database_pool_size + kb_database_pool_overflow)
+        for: 5m
+        labels: {severity: critical}
+        annotations:
+          summary: Database connection pool has no immediately available capacity
+      - alert: EnterpriseRagDatabasePoolTimeouts
+        expr: increase(kb_database_pool_timeouts_total[10m]) > 0
+        for: 1m
+        labels: {severity: critical}
+        annotations:
+          summary: Database connection pool checkout timed out
+      - alert: EnterpriseRagMilvusFailures
+        expr: sum(rate(kb_milvus_retrieval_duration_seconds_count{status="error"}[10m])) > 0.02
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: Milvus retrieval failures are elevated
+      - alert: EnterpriseRagImportFailures
+        expr: sum(increase(kb_import_tasks_total{status="failed"}[15m])) > 5
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: Import task failure volume is elevated
+      - alert: EnterpriseRagPermissionDenialsSpike
+        expr: sum(rate(kb_authentication_events_total{outcome="failure",reason="forbidden"}[10m])) > 0.5
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: Authorization denials increased unexpectedly
+      - alert: EnterpriseRagEstimatedModelCostSpike
+        expr: sum(increase(kb_model_estimated_cost_usd_total[1h])) > 10
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: Estimated model cost exceeded the initial hourly safety threshold
+      - alert: EnterpriseRagAbstentionRateHigh
+        expr: sum(rate(kb_rag_evidence_total{sufficient="false"}[30m])) / clamp_min(sum(rate(kb_rag_evidence_total[30m])), 1) > 0.6
+        for: 30m
+        labels: {severity: info}
+        annotations:
+          summary: More than 60 percent of recent answers are abstentions

@@ -50,6 +50,7 @@ def test_metrics_expose_enterprise_observability_contract():
     for name in (
         "kb_http_requests_total",
         "kb_http_request_duration_seconds_bucket",
+        "kb_http_requests_in_flight",
         "kb_model_calls_total",
         "kb_model_tokens",
         "kb_model_estimated_cost_usd",
@@ -58,6 +59,11 @@ def test_metrics_expose_enterprise_observability_contract():
         "kb_worker_queue_length",
         "kb_rag_answer_confidence",
         "kb_rag_citation_count",
+        "kb_embedding_calls_total",
+        "kb_embedding_duration_seconds",
+        "kb_query_end_to_end_duration_seconds",
+        "kb_database_pool_checked_out",
+        "kb_database_pool_timeouts_total",
     ):
         assert name in body
 

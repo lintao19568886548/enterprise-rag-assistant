@@ -9,7 +9,7 @@ from collections import defaultdict, deque
 from typing import Any, Awaitable, cast
 
 from fastapi import FastAPI, Request
-from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
+from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, Histogram, generate_latest
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse, Response
 
@@ -30,6 +30,11 @@ REQUEST_LATENCY = Histogram(
     "HTTP request latency",
     ("service", "method", "path"),
 )
+REQUEST_IN_FLIGHT = Gauge(
+    "kb_http_requests_in_flight",
+    "HTTP requests currently being handled",
+    ("service",),
+)
 
 
 class RequestContextMiddleware(BaseHTTPMiddleware):
@@ -44,6 +49,7 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
         request.state.request_id = request_id
         request.state.trace_id = trace_id
         start = time.perf_counter()
+        REQUEST_IN_FLIGHT.labels(self.service_name).inc()
         with logger.contextualize(request_id=request_id, trace_id=trace_id):
             try:
                 response = await call_next(request)
@@ -68,6 +74,7 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
                 ).info("http_request_completed")
                 return response
             finally:
+                REQUEST_IN_FLIGHT.labels(self.service_name).dec()
                 clear_identity_context()
 
 
