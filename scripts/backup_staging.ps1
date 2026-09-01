@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
     [string]$ComposeFile = "compose.staging.yaml",
+    [string]$EnvFile = ".env.staging",
     [string]$BackupRoot = "backups/staging",
     [string]$ProjectName = "enterprise-rag-staging"
 )
@@ -17,8 +18,10 @@ if (Test-Path -LiteralPath $target) { throw "Refusing to overwrite an existing b
 New-Item -ItemType Directory -Path $target | Out-Null
 
 $compose = Join-Path $repositoryRoot $ComposeFile
-docker compose -p $ProjectName -f $compose exec -T postgres sh -c 'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" --format=custom --no-owner --no-privileges' |
+$environment = (Resolve-Path (Join-Path $repositoryRoot $EnvFile)).Path
+docker compose --env-file $environment -p $ProjectName -f $compose exec -T postgres sh -c 'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" --format=custom --no-owner --no-privileges' |
     Set-Content -LiteralPath (Join-Path $target "postgres.dump") -AsByteStream
+if ($LASTEXITCODE -ne 0) { throw "PostgreSQL backup failed" }
 
 $volumeMap = @{
     "minio-data" = "minio-data.tar.gz"
@@ -30,6 +33,7 @@ foreach ($volumeName in $volumeMap.Keys) {
     $dockerVolume = "${ProjectName}_${volumeName}"
     docker run --rm -v "${dockerVolume}:/source:ro" alpine:3.21 tar -C /source -czf - . |
         Set-Content -LiteralPath (Join-Path $target $volumeMap[$volumeName]) -AsByteStream
+    if ($LASTEXITCODE -ne 0) { throw "Volume backup failed: $volumeName" }
 }
 
 $structure = Join-Path $target "configuration-structure"
