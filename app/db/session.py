@@ -9,6 +9,7 @@ from typing import Any
 
 from sqlalchemy import Engine, create_engine, event, text
 from sqlalchemy.engine import Connection
+from sqlalchemy.exc import TimeoutError as SQLAlchemyTimeoutError
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -20,10 +21,30 @@ from app.core.tenant_context import (
     set_identity_context,
 )
 from app.db.models import Base
+from app.core.metrics import (
+    DATABASE_POOL_CHECKED_OUT,
+    DATABASE_POOL_OVERFLOW,
+    DATABASE_POOL_SIZE,
+    DATABASE_POOL_TIMEOUTS,
+)
+
+
+def _pool_value(engine: Engine, name: str) -> int:
+    value = getattr(engine.pool, name, None)
+    try:
+        return int(value()) if callable(value) else int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def record_database_pool_metrics(engine: Engine) -> None:
+    DATABASE_POOL_SIZE.set(_pool_value(engine, "size"))
+    DATABASE_POOL_CHECKED_OUT.set(_pool_value(engine, "checkedout"))
+    DATABASE_POOL_OVERFLOW.set(max(0, _pool_value(engine, "overflow")))
 
 
 def normalized_database_url() -> str:
-    url = settings.database_url
+    url = settings.database_dsn
     prefix = "sqlite:///./"
     if url.startswith(prefix):
         relative = url[len(prefix) :]
@@ -48,6 +69,13 @@ def get_engine() -> Engine:
             pool_recycle=settings.database_pool_recycle_seconds,
         )
     engine = create_engine(url, **kwargs)
+    record_database_pool_metrics(engine)
+
+    @event.listens_for(engine, "checkout")
+    @event.listens_for(engine, "checkin")
+    def _record_pool_event(*_args: Any) -> None:
+        record_database_pool_metrics(engine)
+
     if url.startswith("sqlite"):
         @event.listens_for(engine, "connect")
         def configure_sqlite(connection, _):
@@ -114,8 +142,10 @@ def session_scope(
     try:
         yield session
         session.commit()
-    except Exception:
+    except Exception as exc:
         session.rollback()
+        if isinstance(exc, SQLAlchemyTimeoutError):
+            DATABASE_POOL_TIMEOUTS.inc()
         raise
     finally:
         session.close()

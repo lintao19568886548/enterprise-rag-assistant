@@ -1,6 +1,9 @@
+import time
+
 from pymilvus.model.hybrid import BGEM3EmbeddingFunction
 from app.core.logger import logger
 from app.conf.embedding_config import embedding_config
+from app.core.metrics import EMBEDDING_CALLS, EMBEDDING_ITEMS, EMBEDDING_LATENCY
 
 # 模型单例对象，避免重复初始化
 _bge_m3_ef = None
@@ -61,6 +64,8 @@ def generate_embeddings(texts):
         raise ValueError("参数texts必须是包含文本的非空列表")
 
     logger.info(f"开始为{len(texts)}条文本生成混合向量嵌入")
+    started = time.perf_counter()
+    EMBEDDING_ITEMS.inc(len(texts))
     try:
         # 加载BGE-M3模型单例
         model = get_bge_m3_ef()
@@ -89,11 +94,15 @@ def generate_embeddings(texts):
             "sparse": processed_sparse  # 字典列表，模型已做L2归一化
         }
         logger.success(f"{len(texts)}条文本向量生成完成，格式已适配工业级使用")
+        EMBEDDING_CALLS.labels("success").inc()
         return result
 
     except Exception as e:
+        EMBEDDING_CALLS.labels("error").inc()
         logger.opt(exception=True).error("文本向量生成失败：{}", e)
         raise  # 不吞异常，向上传递让调用方做重试/降级处理
+    finally:
+        EMBEDDING_LATENCY.observe(time.perf_counter() - started)
 
 
 """

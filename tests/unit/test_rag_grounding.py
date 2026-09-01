@@ -3,6 +3,7 @@ from app.query_process.agent.nodes.node_answer_output import (
     NodeAnswerOutput,
 )
 from app.query_process.agent.nodes.node_rerank import NodeRerank
+from app.query_process.agent.nodes.node_rrf import NodeRrf
 from app.query_process.agent.state import create_default_state
 from app.utils.milvus_utils import build_chunk_filter
 
@@ -47,6 +48,10 @@ def test_grounded_answer_builds_structured_citations():
             "document_id": "doc-1",
             "document_version": 2,
             "page_number": 7,
+            "section_title": "",
+            "content_hash": "",
+            "chunk_index": None,
+            "image_refs": [],
             "url": "",
             "score": 0.91,
         }
@@ -137,3 +142,49 @@ def test_rerank_failure_preserves_documents(monkeypatch):
     docs = [{"content": "手册内容", "chunk_id": "1", "retrieval_score": 0.7}]
     result = NodeRerank()._rerank_merged_docs("问题", docs)
     assert result == [{**docs[0], "score": 0.7}]
+
+
+def test_rrf_empty_input_is_safe_and_duplicate_chunks_are_fused():
+    node = NodeRrf()
+    assert node.process(create_default_state(session_id="empty"))["rrf_chunks"] == []
+    merged = node._rrf_merge(
+        [
+            ([{"chunk_id": "same", "content": "first"}], 1.0),
+            ([{"chunk_id": "same", "content": "duplicate"}], 1.0),
+        ],
+        max_results=10,
+    )
+    assert len(merged) == 1
+    assert merged[0][0]["content"] == "first"
+    assert merged[0][0]["rrf_score"] > 0
+
+
+def test_rerank_deduplicates_local_and_web_fragments_without_reordering():
+    documents = [
+        {"chunk_id": "one", "content": "same"},
+        {"chunk_id": "one", "content": "duplicate"},
+        {"url": "https://example.test/a", "content": "web"},
+        {"url": "https://example.test/a", "content": "web duplicate"},
+    ]
+    assert NodeRerank._deduplicate_docs(documents) == [documents[0], documents[2]]
+
+
+def test_citation_traces_section_chunk_and_retrieved_image():
+    citation = NodeAnswerOutput._build_citations(
+        [
+            {
+                "content": "说明图 ![端口](minio://images/port.png)",
+                "chunk_id": "chunk-9",
+                "document_id": "doc-9",
+                "document_version": 3,
+                "section_title": "端口说明",
+                "content_hash": "abc123",
+                "chunk_index": 8,
+                "score": 0.9,
+            }
+        ]
+    )[0]
+    assert citation["section_title"] == "端口说明"
+    assert citation["content_hash"] == "abc123"
+    assert citation["chunk_index"] == 8
+    assert citation["image_refs"] == ["minio://images/port.png"]

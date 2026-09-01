@@ -2,7 +2,7 @@ import json
 
 from fastapi.testclient import TestClient
 
-from app.core.logger import redact_log_text
+from app.core.logger import redact_log_text, redact_log_value
 from app.import_process.api.file_import_service import app as import_app
 from scripts.recovery_drill_sqlite import run_drill
 
@@ -23,6 +23,24 @@ def test_sensitive_credentials_are_redacted():
     assert redacted.count("***REDACTED***") >= 5
 
 
+def test_nested_structured_credentials_are_redacted():
+    bearer = "nested-" + "secret-token-123456"
+    database_password = "nested-" + "database-password"
+    api_secret = "nested-" + "api-secret-123456"
+    structured = {
+        "headers": {"Authorization": f"Bearer {bearer}"},
+        "database_url": f"postgresql://user:{database_password}@postgres/db",
+        "items": [{"message": f"API_KEY={api_secret}"}],
+        "safe": "visible",
+    }
+    redacted = redact_log_value(structured)
+    rendered = json.dumps(redacted)
+    assert bearer not in rendered
+    assert database_password not in rendered
+    assert api_secret not in rendered
+    assert redacted["safe"] == "visible"
+
+
 def test_metrics_expose_enterprise_observability_contract():
     with TestClient(import_app) as client:
         client.get("/health/live")
@@ -32,6 +50,7 @@ def test_metrics_expose_enterprise_observability_contract():
     for name in (
         "kb_http_requests_total",
         "kb_http_request_duration_seconds_bucket",
+        "kb_http_requests_in_flight",
         "kb_model_calls_total",
         "kb_model_tokens",
         "kb_model_estimated_cost_usd",
@@ -40,6 +59,11 @@ def test_metrics_expose_enterprise_observability_contract():
         "kb_worker_queue_length",
         "kb_rag_answer_confidence",
         "kb_rag_citation_count",
+        "kb_embedding_calls_total",
+        "kb_embedding_duration_seconds",
+        "kb_query_end_to_end_duration_seconds",
+        "kb_database_pool_checked_out",
+        "kb_database_pool_timeouts_total",
     ):
         assert name in body
 

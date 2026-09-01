@@ -9,19 +9,20 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-import uvicorn
 from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
 from app.api.knowledge_router import router as knowledge_router
 from app.api.admin_router import router as admin_router
+from app.api.auth_router import router as auth_router
 from app.clients.minio_utils import get_minio_client
 from app.core.errors import AppError, ErrorCode
 from app.core.health import create_health_router
 from app.core.logger import logger
 from app.core.middleware import install_common_api_features
 from app.core.security import RequireAdmin, RequireEditor, RequireReadonly
+from app.core.server import run_api
 from app.core.settings import settings
 from app.import_process.agent.kb_import_workflow import get_default_import_workflow
 from app.import_process.services.import_runner import run_import_graph
@@ -95,6 +96,7 @@ install_common_api_features(app, "import")
 app.include_router(create_health_router("import"))
 app.include_router(knowledge_router)
 app.include_router(admin_router)
+app.include_router(auth_router)
 
 
 @app.get("/import.html", response_class=FileResponse)
@@ -573,4 +575,4 @@ async def rebuild_document(
 
 
 if __name__ == "__main__":
-    uvicorn.run(app=app, host=settings.api_host, port=settings.import_service_port)
+    run_api(app, host=settings.api_host, port=settings.import_service_port)

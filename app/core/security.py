@@ -16,6 +16,8 @@ from app.core.errors import AppError, ErrorCode
 from app.core.logger import logger
 from app.core.metrics import AUTH_EVENTS
 from app.core.oidc import OIDCTokenError, decode_oidc_token
+from app.core.oidc_flow import resolve_browser_session
+from app.core.oidc_session import OIDCSessionError, oidc_session_manager
 from app.core.settings import settings
 from app.core.tenant_context import set_identity_context
 from app.db.identity_repositories import (
@@ -167,6 +169,40 @@ def _record_auth(method: str, outcome: str, reason: str, principal: Principal | 
     ).info("authentication_event")
 
 
+async def _resolve_oidc_principal(token: str, authentication_method: str) -> Principal:
+    try:
+        oidc_claims = await run_in_threadpool(decode_oidc_token, token)
+    except OIDCTokenError as exc:
+        _record_auth(authentication_method, "failure", "invalid")
+        raise _unauthorized() from exc
+    set_identity_context(
+        tenant_id=None,
+        user_id=None,
+        oidc_subject=oidc_claims.subject,
+        oidc_issuer=oidc_claims.issuer,
+    )
+    identity = await run_in_threadpool(
+        resolve_oidc_membership,
+        oidc_claims.issuer,
+        oidc_claims.subject,
+    )
+    if identity is None:
+        _record_auth(authentication_method, "failure", "disabled")
+        raise _unauthorized("当前企业身份尚未开通或已被禁用")
+    user, membership, tenant = identity
+    if membership.role not in ENTERPRISE_ROLES:
+        _record_auth(authentication_method, "failure", "forbidden")
+        raise _unauthorized("当前企业角色无效")
+    return Principal(
+        subject=oidc_claims.subject,
+        role=cast(EnterpriseRole, membership.role),
+        user_id=user.id,
+        tenant_id=tenant.id,
+        department_id=membership.department_id,
+        authentication_method=authentication_method,
+    )
+
+
 async def _authenticate(
     request: Request,
     authorization: str | None,
@@ -185,37 +221,7 @@ async def _authenticate(
         if scheme.lower() != "bearer" or not token or not settings.oidc_enabled:
             _record_auth("oidc", "failure", "invalid")
             raise _unauthorized()
-        try:
-            oidc_claims = await run_in_threadpool(decode_oidc_token, token)
-        except OIDCTokenError as exc:
-            _record_auth("oidc", "failure", "invalid")
-            raise _unauthorized() from exc
-        set_identity_context(
-            tenant_id=None,
-            user_id=None,
-            oidc_subject=oidc_claims.subject,
-            oidc_issuer=oidc_claims.issuer,
-        )
-        identity = await run_in_threadpool(
-            resolve_oidc_membership,
-            oidc_claims.issuer,
-            oidc_claims.subject,
-        )
-        if identity is None:
-            _record_auth("oidc", "failure", "disabled")
-            raise _unauthorized("当前企业身份尚未开通或已被禁用")
-        user, membership, tenant = identity
-        if membership.role not in ENTERPRISE_ROLES:
-            _record_auth("oidc", "failure", "forbidden")
-            raise _unauthorized("当前企业角色无效")
-        principal = Principal(
-            subject=oidc_claims.subject,
-            role=cast(EnterpriseRole, membership.role),
-            user_id=user.id,
-            tenant_id=tenant.id,
-            department_id=membership.department_id,
-            authentication_method="oidc",
-        )
+        principal = await _resolve_oidc_principal(token, "oidc")
     elif x_api_key:
         candidate: Principal | None = await run_in_threadpool(
             _resolve_service_account_api_key,
@@ -227,6 +233,21 @@ async def _authenticate(
             _record_auth("service_account", "failure", "invalid")
             raise _unauthorized()
         principal = candidate
+    elif session_id := request.cookies.get(settings.oidc_session_cookie_name):
+        if not settings.oidc_enabled:
+            _record_auth("oidc_session", "failure", "disabled")
+            raise _unauthorized()
+        try:
+            browser_session = await run_in_threadpool(
+                resolve_browser_session,
+                session_id,
+                manager=oidc_session_manager,
+                config=settings,
+            )
+        except (OIDCTokenError, OIDCSessionError) as exc:
+            _record_auth("oidc_session", "failure", "invalid")
+            raise _unauthorized("当前登录会话需要重新认证") from exc
+        principal = await _resolve_oidc_principal(browser_session.access_token, "oidc_session")
     else:
         _record_auth("unknown", "failure", "missing")
         raise _unauthorized("缺少 Bearer Token 或服务账户密钥")
@@ -234,9 +255,9 @@ async def _authenticate(
     set_identity_context(
         tenant_id=principal.tenant_id,
         user_id=principal.user_id,
-        oidc_subject=principal.subject if principal.authentication_method == "oidc" else None,
+        oidc_subject=principal.subject if principal.authentication_method.startswith("oidc") else None,
         oidc_issuer=(settings.oidc_issuer_url or "").rstrip("/")
-        if principal.authentication_method == "oidc"
+        if principal.authentication_method.startswith("oidc")
         else None,
     )
     if settings.database_enabled and principal.authentication_method != "service_account":
@@ -275,9 +296,18 @@ def require_permission(permission: Permission):
     return dependency
 
 
+async def require_authenticated(
+    request: Request,
+    authorization: Annotated[str | None, Header(alias="Authorization")] = None,
+    x_api_key: Annotated[str | None, Header(alias="X-API-Key")] = None,
+) -> Principal:
+    return await _authenticate(request, authorization, x_api_key)
+
+
 RequireReadonly = Annotated[Principal, Depends(require_permission("read"))]
 RequireUser = Annotated[Principal, Depends(require_permission("query"))]
 RequireEditor = Annotated[Principal, Depends(require_permission("write_document"))]
 RequireAdmin = Annotated[Principal, Depends(require_permission("manage_kb"))]
 RequireTenantAdmin = Annotated[Principal, Depends(require_permission("manage_tenant"))]
 RequireAuditor = Annotated[Principal, Depends(require_permission("read_audit"))]
+RequireAuthenticated = Annotated[Principal, Depends(require_authenticated)]

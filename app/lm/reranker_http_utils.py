@@ -1,3 +1,4 @@
+import random
 import time
 
 import dashscope
@@ -44,6 +45,7 @@ def rerank_documents(query: str, documents: list[str]) -> list[float]:
             if attempt >= settings.model_max_retries:
                 raise RuntimeError("DashScope rerank request failed") from exc
             delay = min(4.0, 0.5 * (2**attempt))
+            delay += random.uniform(0.0, min(0.25, delay * 0.2))
             logger.warning(
                 "Rerank 调用失败，准备重试，attempt={}/{}，error={}",
                 attempt + 1,

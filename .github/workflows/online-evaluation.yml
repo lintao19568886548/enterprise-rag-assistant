@@ -16,8 +16,8 @@ jobs:
       STAGING_QUERY_URL: ${{ secrets.STAGING_QUERY_URL }}
       KB_EVAL_API_KEY: ${{ secrets.STAGING_EVAL_API_KEY }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.11"
           cache: pip
@@ -40,7 +40,9 @@ jobs:
           --output evaluation/reports/online-release.json
       - name: Upload online report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: online-rag-evaluation
-          path: evaluation/reports/online-release.json
+          path: |
+            evaluation/reports/online-release.json
+            evaluation/reports/online-release.md

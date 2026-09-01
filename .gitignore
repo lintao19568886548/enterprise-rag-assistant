@@ -2,6 +2,7 @@
 .env
 .env.*
 !.env.example
+!.env.*.example
 *.pem
 *.key
 
@@ -23,6 +24,7 @@ deploy/nginx/certs/*.key
 .env.staging
 
 # Runtime data and logs
+backups/
 logs/
 output/
 data/

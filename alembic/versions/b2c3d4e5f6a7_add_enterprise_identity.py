@@ -44,6 +44,50 @@ def upgrade() -> None:
         batch.add_column(sa.Column("display_name", sa.String(length=255), nullable=True))
         batch.add_column(sa.Column("oidc_issuer", sa.String(length=1024), nullable=True))
 
+    # A legacy database normally already contains the compatibility user, but a
+    # fresh PostgreSQL database does not.  Seed it before creating the default
+    # membership so the foreign key is valid on both upgrade paths.
+    users = sa.table(
+        "users",
+        sa.column("id", sa.String(length=36)),
+        sa.column("tenant_id", sa.String(length=36)),
+        sa.column("username", sa.String(length=128)),
+        sa.column("password_hash", sa.String(length=255)),
+        sa.column("external_identity_id", sa.String(length=255)),
+        sa.column("role", sa.String(length=32)),
+        sa.column("enabled", sa.Boolean()),
+        sa.column("email", sa.String(length=320)),
+        sa.column("display_name", sa.String(length=255)),
+        sa.column("oidc_issuer", sa.String(length=1024)),
+    )
+    connection = op.get_bind()
+    default_user_exists = connection.execute(
+        sa.select(users.c.id).where(users.c.id == DEFAULT_USER_ID)
+    ).first()
+    if default_user_exists is None:
+        local_admin_exists = connection.execute(
+            sa.select(users.c.id).where(users.c.username == "local-admin")
+        ).first()
+        op.bulk_insert(
+            users,
+            [
+                {
+                    "id": DEFAULT_USER_ID,
+                    "tenant_id": DEFAULT_TENANT_ID,
+                    "username": "local-admin"
+                    if local_admin_exists is None
+                    else "local-admin-default",
+                    "password_hash": None,
+                    "external_identity_id": None,
+                    "role": "admin",
+                    "enabled": True,
+                    "email": None,
+                    "display_name": None,
+                    "oidc_issuer": None,
+                }
+            ],
+        )
+
     op.create_table(
         "departments",
         sa.Column("id", sa.String(length=36), nullable=False),

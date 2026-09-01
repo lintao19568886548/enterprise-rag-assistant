@@ -15,6 +15,7 @@
 import inspect
 import re
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 
 from loguru import logger as loguru_logger
@@ -53,6 +54,14 @@ _SECRET_VALUES = tuple(
         settings.reveal(settings.user_api_keys),
         settings.reveal(settings.readonly_api_keys),
         settings.reveal(settings.langgraph_aes_key),
+        settings.reveal(settings.oidc_client_secret),
+        settings.reveal(settings.oidc_session_encryption_key),
+        settings.reveal(settings.milvus_token),
+        settings.redis_dsn,
+        settings.database_dsn,
+        settings.langgraph_database_dsn,
+        settings.effective_celery_broker_url,
+        settings.effective_celery_result_backend,
     )
     if value
 )
@@ -60,8 +69,13 @@ _SECRET_PATTERN = re.compile(
     r"(?i)(?:sk-[a-z0-9_-]{12,}|bearer\s+[a-z0-9._~+/=-]{12,}|eyj[a-z0-9._~-]{20,})"
 )
 _NAMED_SECRET_PATTERN = re.compile(
-    r"(?i)\b(authorization|cookie|set-cookie|x-api-key|api[_-]?key|token|password|secret)"
+    r"(?i)\b(authorization|cookie|set-cookie|x-api-key|api[_-]?key|token|password|secret|"
+    r"database[_-]?url|redis[_-]?url|dsn|connection[_-]?string)"
     r"(\s*[:=]\s*)([^\s,;}&]+)"
+)
+_SENSITIVE_FIELD_PATTERN = re.compile(
+    r"(?i)(authorization|cookie|api[_-]?key|token|password|secret|database[_-]?url|"
+    r"redis[_-]?url|dsn|connection[_-]?string)"
 )
 _URL_CREDENTIAL_PATTERN = re.compile(r"(?i)([a-z][a-z0-9+.-]*://[^:/\s]+:)([^@/\s]+)(@)")
 
@@ -75,13 +89,28 @@ def redact_log_text(value: object) -> str:
     return _URL_CREDENTIAL_PATTERN.sub(r"\1***REDACTED***\3", message)
 
 
+def redact_log_value(value: object, *, field_name: str | None = None) -> object:
+    """Recursively redact credentials in structured log extras."""
+    if field_name and _SENSITIVE_FIELD_PATTERN.search(field_name):
+        return "***REDACTED***"
+    if isinstance(value, str):
+        return redact_log_text(value)
+    if isinstance(value, Mapping):
+        return {
+            key: redact_log_value(item, field_name=str(key))
+            for key, item in value.items()
+        }
+    if isinstance(value, tuple):
+        return tuple(redact_log_value(item) for item in value)
+    if isinstance(value, list):
+        return [redact_log_value(item) for item in value]
+    return value
+
+
 def _redact_record(record):
     """Remove configured credentials and common token forms before writing."""
     record["message"] = redact_log_text(record["message"])
-    record["extra"] = {
-        key: redact_log_text(value) if isinstance(value, str) else value
-        for key, value in record["extra"].items()
-    }
+    record["extra"] = redact_log_value(record["extra"])
     if settings.app_env in {"staging", "production"} and not settings.log_sensitive_content:
         record["exception"] = None
     return True

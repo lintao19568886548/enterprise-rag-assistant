@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+import time
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-import uvicorn
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,12 +15,15 @@ from pydantic import BaseModel, Field, field_validator
 
 from app.clients.mongo_history_utils import clear_history, get_recent_messages
 from app.api.admin_router import router as admin_router
+from app.api.auth_router import router as auth_router
 from app.api.knowledge_router import router as knowledge_router
 from app.core.errors import AppError, ErrorCode, classify_exception
 from app.core.health import create_health_router
 from app.core.logger import logger
+from app.core.metrics import QUERY_END_TO_END_LATENCY
 from app.core.middleware import install_common_api_features
 from app.core.security import RequireAdmin, RequireReadonly, RequireUser
+from app.core.server import run_api
 from app.core.settings import settings
 from app.core.tenant_context import identity_context
 from app.db.repositories import (
@@ -84,6 +87,7 @@ install_common_api_features(app, "query")
 app.include_router(create_health_router("query"))
 app.include_router(knowledge_router)
 app.include_router(admin_router)
+app.include_router(auth_router)
 
 
 @app.get("/chat.html", response_class=FileResponse)
@@ -267,6 +271,13 @@ async def query(
         ),
         "model": get_task_result(session_id, "model", ""),
         "latency_ms": get_task_result(session_id, "latency_ms", 0),
+        "model_latency_ms": get_task_result(session_id, "model_latency_ms", 0),
+        "total_latency_ms": get_task_result(session_id, "total_latency_ms", 0),
+        "local_latency_ms": get_task_result(session_id, "local_latency_ms", 0),
+        "input_tokens": get_task_result(session_id, "input_tokens", 0),
+        "output_tokens": get_task_result(session_id, "output_tokens", 0),
+        "total_tokens": get_task_result(session_id, "total_tokens", 0),
+        "cost": get_task_result(session_id, "cost", 0.0),
         "message_id": get_task_result(session_id, "message_id", ""),
         "done_list": [],
     }
@@ -313,10 +324,17 @@ def _run_query_graph_in_context(
         user_id=user_id,
         tenant_id=tenant_id,
     )
+    started = time.perf_counter()
+    status = "success"
     try:
         get_default_query_workflow().run(state)
+        total_latency_ms = int((time.perf_counter() - started) * 1000)
+        model_latency_ms = int(get_task_result(session_id, "model_latency_ms", 0) or 0)
+        set_task_result(session_id, "total_latency_ms", total_latency_ms)
+        set_task_result(session_id, "local_latency_ms", max(0, total_latency_ms - model_latency_ms))
         update_task_status(session_id, TASK_STATUS_COMPLETED, is_stream)
     except Exception as exc:
+        status = "error"
         error_code = classify_exception(exc)
         logger.opt(exception=True).error("[{}] 问答工作流失败：{}", session_id, exc)
         set_task_result(session_id, "error", str(error_code))
@@ -327,6 +345,8 @@ def _run_query_graph_in_context(
                 SSEEvent.ERROR,
                 {"code": error_code, "error": "问答流程执行失败"},
             )
+    finally:
+        QUERY_END_TO_END_LATENCY.labels(status).observe(time.perf_counter() - started)
 
 
 @app.get("/stream/{session_id}")
@@ -447,4 +467,4 @@ async def clear_chat_history(session_id: str, principal: RequireAdmin):
 
 
 if __name__ == "__main__":
-    uvicorn.run(app, host=settings.api_host, port=settings.query_service_port)
+    run_api(app, host=settings.api_host, port=settings.query_service_port)

@@ -1,0 +1,201 @@
+{
+  "executed_at": "2026-09-01T14:36:07.4499659+08:00",
+  "timezone": "Asia/Shanghai",
+  "branch": "phase3/release-readiness",
+  "base_branch": "phase2/enterprise-production",
+  "alembic_head": "d4e5f6a7b8c9",
+  "decision": {
+    "local_engineering_acceptance": "passed",
+    "production_release": "blocked"
+  },
+  "backup": {
+    "path": "backups/pre_phase3_20260901_011207",
+    "repository_bundle": true,
+    "sqlite_integrity": "ok",
+    "foreign_key_errors": 0,
+    "live_milvus_files_copied": false,
+    "note": "Live Milvus files were intentionally not copied while the service was running."
+  },
+  "services": {
+    "started_by": "PyCharm compound run configuration",
+    "import_service": {
+      "url": "http://127.0.0.1:8000/import.html",
+      "ready": true
+    },
+    "query_service": {
+      "url": "http://127.0.0.1:8001/chat.html",
+      "ready": true
+    },
+    "milvus": {
+      "address": "127.0.0.1:19530",
+      "listening": true
+    }
+  },
+  "automated_checks": {
+    "pytest": {
+      "passed": 135,
+      "skipped": 4,
+      "warnings": 1,
+      "status": "passed_with_declared_postgres_skips"
+    },
+    "ruff": {
+      "status": "passed"
+    },
+    "mypy": {
+      "source_files": 147,
+      "status": "passed"
+    },
+    "compileall": {
+      "status": "passed"
+    },
+    "secret_scan": {
+      "files_inspected": 306,
+      "findings": 0,
+      "status": "passed"
+    },
+    "dependency_audit": {
+      "locked_runtime_requirements": 176,
+      "known_vulnerabilities": 0,
+      "tool": "pip-audit 2.9.0",
+      "status": "passed"
+    },
+    "sqlite_alembic_rehearsal": {
+      "sequence": [
+        "upgrade head",
+        "downgrade base",
+        "upgrade head"
+      ],
+      "final_revision": "d4e5f6a7b8c9 (head)",
+      "status": "passed"
+    },
+    "postgresql_rls": {
+      "postgres_version": 17,
+      "blank_database_migrated_to": "d4e5f6a7b8c9 (head)",
+      "public_tables": 18,
+      "rls_enabled_tables": 16,
+      "unvalidated_foreign_keys": 0,
+      "runtime_role": {
+        "superuser": false,
+        "createdb": false,
+        "createrole": false,
+        "inherit": false,
+        "bypassrls": false
+      },
+      "real_tests_passed": 4,
+      "status": "passed_local_real_postgresql"
+    },
+    "oidc": {
+      "automated_security_tests": "passed",
+      "local_keycloak_round_trip": "passed_authorization_code_pkce_state_nonce_session_refresh_replay_logout",
+      "enterprise_idp_round_trip": "not_verified"
+    },
+    "milvus_isolation": {
+      "rounds": 100,
+      "inserted_disposable_vectors": 200,
+      "cross_tenant_leaks": 0,
+      "p50_ms": 3.844,
+      "p95_ms": 5.722,
+      "p99_ms": 9.004,
+      "temporary_collection_removed": true,
+      "status": "passed"
+    }
+  },
+  "live_query": {
+    "status": "passed",
+    "answer_characters": 262,
+    "citations": 5,
+    "image_urls": 7,
+    "confidence": 0.9115,
+    "has_sufficient_evidence": true,
+    "local_latency_ms": 22527,
+    "model_latency_ms": 2128,
+    "total_latency_ms": 24655,
+    "input_tokens": 3166,
+    "output_tokens": 173,
+    "total_tokens": 3339
+  },
+  "browser_acceptance": {
+    "desktop": {
+      "chat_horizontal_overflow": false,
+      "import_horizontal_overflow": false,
+      "console_warning_or_error_count": 0
+    },
+    "mobile_390x844": {
+      "chat_inner_width": 390,
+      "import_inner_width": 390,
+      "chat_horizontal_overflow": false,
+      "import_horizontal_overflow": false,
+      "console_warning_or_error_count": 0
+    },
+    "device_emulation_reset": true,
+    "status": "passed"
+  },
+  "evaluation": {
+    "dataset_total": 100,
+    "approved": 30,
+    "needs_human_label": 70,
+    "pr_gate": {
+      "passed_cases": 30,
+      "total_cases": 30,
+      "status": "passed_offline_scorer_contract"
+    },
+    "release_gate": {
+      "status": "blocked_as_designed",
+      "minimum_approved_required": 100,
+      "missing_approved_categories": [
+        "bad_citation",
+        "permission_isolation",
+        "prompt_injection",
+        "table_image"
+      ]
+    }
+  },
+  "performance": {
+    "status": "passed_local_baseline",
+    "concurrency_levels": [
+      1,
+      10,
+      30,
+      50
+    ],
+    "local_scenarios": 5,
+    "error_rate": 0.0,
+    "timeout_rate": 0.0,
+    "production_capacity_claim": false,
+    "staging_external_services": "not_exercised"
+  },
+  "recovery": {
+    "sanitized_sqlite_drill": "passed",
+    "elapsed_seconds": 0.2168,
+    "foreign_key_errors": 0,
+    "integrity_check": "ok",
+    "full_postgres_minio_milvus_restore": "blocked"
+  },
+  "supply_chain": {
+    "ci_configuration": "implemented_and_statically_validated",
+    "image": "enterprise-rag-staging-migrate:latest",
+    "docker_content_bytes": 506763228,
+    "runtime_torch": "2.13.0+cpu",
+    "non_root_uid_gid": "10001:10001",
+    "oci_labels_verified": true,
+    "sbom_components": 4028,
+    "trivy": {
+      "critical": 5,
+      "high": 21,
+      "medium": 97,
+      "low": 103,
+      "unknown": 10,
+      "fixable_high_or_critical": 0,
+      "production_gate": "blocked_pending_patched_base_or_security_owner_risk_decision"
+    },
+    "status": "locally_executed_production_blocked"
+  },
+  "blockers": [
+    "Previously exposed DashScope key requires owner rotation.",
+    "70 evaluation cases require real business-expert labels.",
+    "Five critical Debian base-package findings have no current fixed version and require a patched base or an explicit time-bounded security-owner risk decision.",
+    "Enterprise OIDC requires real issuer/client/redirect/scopes and a locally configured client secret.",
+    "Online staging evaluation, full application external-service concurrency profiles, and full PostgreSQL/MinIO/Milvus/etcd restore are not verified.",
+    "Pull requests require explicit action-time confirmation and have not been auto-created or merged."
+  ]
+}

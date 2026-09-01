@@ -4,20 +4,26 @@ x-app-environment: &app-environment
   APP_ENV: staging
   API_HOST: 0.0.0.0
   LOG_JSON: "true"
+  LOG_FILE_ENABLE: "false"
   AUTH_ENABLED: "true"
   OIDC_ENABLED: "true"
   OIDC_ISSUER_URL: ${OIDC_ISSUER_URL:?set OIDC_ISSUER_URL}
   OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:?set OIDC_CLIENT_ID}
+  OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:?set OIDC_CLIENT_SECRET}
   OIDC_AUDIENCE: ${OIDC_AUDIENCE:?set OIDC_AUDIENCE}
+  OIDC_REDIRECT_URI: ${OIDC_REDIRECT_URI:?set OIDC_REDIRECT_URI}
+  OIDC_POST_LOGOUT_REDIRECT_URI: ${OIDC_POST_LOGOUT_REDIRECT_URI:-}
+  OIDC_SCOPES: ${OIDC_SCOPES:-openid profile email}
+  OIDC_SESSION_ENCRYPTION_KEY: ${OIDC_SESSION_ENCRYPTION_KEY:?set OIDC_SESSION_ENCRYPTION_KEY}
   OPENAI_API_KEY: ${OPENAI_API_KEY:?set OPENAI_API_KEY}
   OPENAI_BASE_URL: ${OPENAI_BASE_URL:?set OPENAI_BASE_URL}
   MINERU_API_TOKEN: ${MINERU_API_TOKEN:?set MINERU_API_TOKEN}
   REDIS_ENABLED: "true"
-  REDIS_URL: redis://redis:6379/0
+  REDIS_URL: redis://:${REDIS_PASSWORD:?set REDIS_PASSWORD}@redis:6379/0
   TASK_BACKEND: redis
   TASK_QUEUE_ENABLED: "true"
-  CELERY_BROKER_URL: redis://redis:6379/1
-  CELERY_RESULT_BACKEND: redis://redis:6379/2
+  CELERY_BROKER_URL: redis://:${REDIS_PASSWORD:?set REDIS_PASSWORD}@redis:6379/1
+  CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD:?set REDIS_PASSWORD}@redis:6379/2
   CELERY_TASK_MAX_RETRIES: "3"
   CLEANUP_MAX_RETRIES: "5"
   CLEANUP_RETRY_BASE_SECONDS: "5"
@@ -32,6 +38,7 @@ x-app-environment: &app-environment
   CHUNKS_COLLECTION: kb_chunks_active
   ITEM_NAME_COLLECTION: kb_item_names_active
   KNOWLEDGE_BASE_FILTER_ENABLED: "true"
+  LLM_ALLOWED_MODELS: ${LLM_ALLOWED_MODELS:-qwen-plus,qwen-vl-plus}
   MINIO_ENABLED: "true"
   MINIO_ENDPOINT: minio:9000
   MINIO_PUBLIC_ENDPOINT: ${STAGING_PUBLIC_HOST:-127.0.0.1}:9443
@@ -47,8 +54,18 @@ x-app-environment: &app-environment
 x-app-service: &app-service
   build:
     context: .
+    args:
+      APP_VERSION: ${APP_VERSION:-0.1.0}
+      GIT_SHA: ${GIT_SHA:-unknown}
+      BUILD_TIME: ${BUILD_TIME:-unknown}
   environment: *app-environment
   init: true
+  read_only: true
+  tmpfs:
+    - /tmp:size=256m,mode=1777
+  cap_drop: [ALL]
+  security_opt:
+    - no-new-privileges:true
   stop_grace_period: 45s
   restart: unless-stopped
   volumes:
@@ -136,13 +153,18 @@ services:
 
   redis:
     image: redis:7.4-bookworm
-    command: ["redis-server", "--appendonly", "yes", "--save", "60", "1000"]
+    command:
+      - sh
+      - -c
+      - exec redis-server --appendonly yes --save 60 1000 --requirepass "$$REDIS_PASSWORD"
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD}
     volumes:
       - redis-data:/data
     expose: ["6379"]
     networks: [backend]
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$$REDIS_PASSWORD\" redis-cli ping"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -170,6 +192,10 @@ services:
   migrate:
     build:
       context: .
+      args:
+        APP_VERSION: ${APP_VERSION:-0.1.0}
+        GIT_SHA: ${GIT_SHA:-unknown}
+        BUILD_TIME: ${BUILD_TIME:-unknown}
     environment:
       <<: *app-environment
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-knowledge_owner}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-knowledge_base}

@@ -1,4 +1,5 @@
 
+import hashlib
 from typing import List, Dict, Any, Tuple
 
 from app.query_process.agent.node_base import NodeBase
@@ -43,7 +44,10 @@ class NodeRrf(NodeBase):
 
         # 6. 记录分数范围（便于调试）
         scores = [s for _, s in rrf_merge_results]
-        logger.info(f"分数范围: [{min(scores):.6f}, {max(scores):.6f}]")
+        if scores:
+            logger.info(f"分数范围: [{min(scores):.6f}, {max(scores):.6f}]")
+        else:
+            logger.info("RRF 没有可融合的有效结果")
 
         # 7. 更新state
         state['rrf_chunks'] = rrf_chunks
@@ -96,9 +100,7 @@ class NodeRrf(NodeBase):
 
         for rrf_input, weight in rrf_inputs:
             for rank, doc in enumerate(rrf_input, start=1):
-                chunk_id = doc.get('chunk_id')
-                if chunk_id is None:
-                    continue
+                chunk_id = self._document_key(doc)
                 # RRF 公式: score += weight / (k + rank)
                 chunk_scores[chunk_id] = chunk_scores.get(chunk_id, 0.0) + weight / (k + rank)
 
@@ -107,7 +109,7 @@ class NodeRrf(NodeBase):
 
         # 按得分降序排序
         sorted_results = sorted(
-            [(chunk_data[cid], score) for cid, score in chunk_scores.items()],
+            [({**chunk_data[cid], "rrf_score": score}, score) for cid, score in chunk_scores.items()],
             # 排序时看每个元素的第 2 个值（也就是分数）
             key=lambda x: x[1],
             reverse=True
@@ -119,6 +121,24 @@ class NodeRrf(NodeBase):
 
         # 动态截取前 max_results 条
         return sorted_results[:max_results] if max_results else sorted_results
+
+    @staticmethod
+    def _document_key(doc: Dict[str, Any]) -> str:
+        """Deduplicate by stable provenance, falling back to normalized content."""
+        chunk_id = str(doc.get("chunk_id") or "").strip()
+        if chunk_id:
+            return f"chunk:{chunk_id}"
+        content_hash = str(doc.get("content_hash") or "").strip()
+        if content_hash:
+            return f"hash:{content_hash}"
+        provenance = ":".join(
+            str(doc.get(field) or "")
+            for field in ("document_id", "document_version", "chunk_index")
+        )
+        if provenance.replace(":", ""):
+            return f"provenance:{provenance}"
+        content = " ".join(str(doc.get("content") or "").split()).casefold()
+        return f"content:{hashlib.sha256(content.encode('utf-8')).hexdigest()}"
 
 if __name__ == '__main__':
 

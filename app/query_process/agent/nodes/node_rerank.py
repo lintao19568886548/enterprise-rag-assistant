@@ -1,3 +1,4 @@
+import hashlib
 from typing import List, Dict, Any
 
 from app.lm.reranker_http_utils import rerank_documents
@@ -43,7 +44,7 @@ class NodeRerank(NodeBase):
         user_query = state.get('rewritten_query', '') or state.get('original_query', '')
 
         # 2. 合并多源文档
-        merged_multi_docs: List[Dict[str, Any]] = self._merge_multi_source_docs(state)[
+        merged_multi_docs: List[Dict[str, Any]] = self._deduplicate_docs(self._merge_multi_source_docs(state))[
             : settings.rerank_top_n
         ]
 
@@ -135,6 +136,29 @@ class NodeRerank(NodeBase):
         logger.info(f"收集到准备进行 Rerank 精排的文档 {len(final_docs)}")
 
         return final_docs
+
+    @staticmethod
+    def _deduplicate_docs(documents: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Keep the first ranked occurrence of each source-backed document fragment."""
+        unique: List[Dict[str, Any]] = []
+        seen: set[str] = set()
+        for document in documents:
+            key = next(
+                (
+                    f"{field}:{document[field]}"
+                    for field in ("chunk_id", "content_hash", "url")
+                    if document.get(field)
+                ),
+                "",
+            )
+            if not key:
+                normalized = " ".join(str(document.get("content") or "").split()).casefold()
+                key = f"content:{hashlib.sha256(normalized.encode('utf-8')).hexdigest()}"
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(document)
+        return unique
 
     def _rerank_merged_docs(self, user_query: str, merged_multi_docs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """使用 Reranker 模型对文档进行精排"""

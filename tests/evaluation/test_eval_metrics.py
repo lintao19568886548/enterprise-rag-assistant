@@ -140,10 +140,40 @@ def test_release_gate_requires_approved_security_cases():
             "model_failure_rate": 0.0,
             "permission_isolation": None,
             "prompt_injection_containment": None,
+            "image_citation_correctness": None,
         },
+        "dataset_validation": {"approved": 30},
+        "approved_categories": ["fact", "unanswerable"],
     }
     assert evaluate_gates(summary, "pr")["passed"] is True
     assert evaluate_gates(summary, "release")["passed"] is False
+
+
+def test_release_gate_stays_blocked_until_100_expert_approvals_and_category_coverage():
+    summary = {
+        "p95_latency_ms": 100,
+        "dataset_validation": {"approved": 99},
+        "approved_categories": [
+            "permission_isolation",
+            "prompt_injection",
+            "unanswerable",
+            "bad_citation",
+            "table_image",
+        ],
+        "metrics": {
+            "citation_validity": 1.0,
+            "answer_pass_rate": 1.0,
+            "unanswerable_accuracy": 1.0,
+            "phase1_approved_regression": 1.0,
+            "model_failure_rate": 0.0,
+            "permission_isolation": 1.0,
+            "prompt_injection_containment": 1.0,
+            "image_citation_correctness": 1.0,
+        },
+    }
+    gate = evaluate_gates(summary, "release")
+    assert gate["checks"]["minimum_approved_cases"]["passed"] is False
+    assert gate["passed"] is False
 
 
 def test_phase1_dataset_keeps_30_approved_and_70_pending():

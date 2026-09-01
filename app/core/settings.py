@@ -5,11 +5,40 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
+from urllib.parse import unquote, urlsplit
 
 from pydantic import AliasChoices, Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+_WEAK_SECRET_MARKERS = (
+    "change-me",
+    "example",
+    "minioadmin",
+    "password",
+    "placeholder",
+    "replace",
+    "secret",
+    "test",
+)
+
+
+def _url_password(url: str) -> str | None:
+    try:
+        password = urlsplit(url).password
+    except ValueError:
+        return None
+    return unquote(password) if password else None
+
+
+def _validate_deployed_secret(name: str, value: str | None, *, minimum_length: int) -> None:
+    if not value:
+        raise ValueError(f"{name} must be configured in staging/production")
+    normalized = value.casefold()
+    if len(value) < minimum_length or any(marker in normalized for marker in _WEAK_SECRET_MARKERS):
+        raise ValueError(f"{name} is weak or still uses a placeholder")
+    if len(set(value)) < 6:
+        raise ValueError(f"{name} does not have enough character diversity")
 
 
 class Settings(BaseSettings):
@@ -53,11 +82,20 @@ class Settings(BaseSettings):
     oidc_enabled: bool = False
     oidc_issuer_url: str | None = None
     oidc_client_id: str | None = None
+    oidc_client_secret: SecretStr | None = None
     oidc_audience: str | None = None
+    oidc_redirect_uri: str | None = None
+    oidc_post_logout_redirect_uri: str | None = None
+    oidc_scopes: str = "openid profile email"
     oidc_jwks_cache_seconds: int = Field(default=300, ge=30, le=86400)
     oidc_allowed_algorithms: str = "RS256"
     oidc_clock_skew_seconds: int = Field(default=30, ge=0, le=300)
     oidc_http_timeout_seconds: float = Field(default=5.0, gt=0, le=30)
+    oidc_transaction_ttl_seconds: int = Field(default=300, ge=60, le=900)
+    oidc_session_ttl_seconds: int = Field(default=28800, ge=300, le=86400)
+    oidc_session_encryption_key: SecretStr | None = None
+    oidc_session_cookie_name: str = Field(default="kb_oidc_session", min_length=4, max_length=64)
+    oidc_state_cookie_name: str = Field(default="kb_oidc_state", min_length=4, max_length=64)
     admin_api_keys: SecretStr | None = None
     user_api_keys: SecretStr | None = None
     readonly_api_keys: SecretStr | None = None
@@ -119,19 +157,21 @@ class Settings(BaseSettings):
     answer_context_max_chars: int = Field(default=12000, ge=1000, le=200000)
 
     redis_enabled: bool = False
-    redis_url: str = "redis://127.0.0.1:6379/0"
+    redis_url: SecretStr = SecretStr("redis://127.0.0.1:6379/0")
     task_backend: Literal["memory", "redis"] = "memory"
     task_ttl_seconds: int = Field(default=86400, ge=60)
     task_queue_enabled: bool = False
-    celery_broker_url: str | None = None
-    celery_result_backend: str | None = None
+    celery_broker_url: SecretStr | None = None
+    celery_result_backend: SecretStr | None = None
     celery_task_max_retries: int = Field(default=3, ge=0, le=20)
     cleanup_max_retries: int = Field(default=5, ge=1, le=50)
     cleanup_retry_base_seconds: int = Field(default=5, ge=1, le=3600)
     cleanup_retry_max_seconds: int = Field(default=600, ge=1, le=86400)
 
     database_enabled: bool = True
-    database_url: str = f"sqlite:///{(PROJECT_ROOT / 'data' / 'knowledge_base.db').as_posix()}"
+    database_url: SecretStr = SecretStr(
+        f"sqlite:///{(PROJECT_ROOT / 'data' / 'knowledge_base.db').as_posix()}"
+    )
     database_pool_size: int = Field(default=10, ge=1, le=100)
     database_max_overflow: int = Field(default=20, ge=0, le=200)
     database_pool_timeout_seconds: int = Field(default=30, ge=1, le=300)
@@ -139,7 +179,7 @@ class Settings(BaseSettings):
 
     langgraph_checkpointer: Literal["memory", "sqlite", "postgres"] = "sqlite"
     langgraph_checkpoint_path: str = str(PROJECT_ROOT / "data" / "langgraph_checkpoints.sqlite")
-    langgraph_database_url: str | None = None
+    langgraph_database_url: SecretStr | None = None
     langgraph_aes_key: SecretStr | None = None
 
     milvus_uri: str = Field(
@@ -193,12 +233,20 @@ class Settings(BaseSettings):
         return self.app_env == "production"
 
     @property
+    def is_deployed(self) -> bool:
+        return self.app_env in {"staging", "production"}
+
+    @property
     def oidc_algorithms(self) -> list[str]:
         return [
             value.strip().upper()
             for value in self.oidc_allowed_algorithms.split(",")
             if value.strip()
         ]
+
+    @property
+    def oidc_scope_values(self) -> list[str]:
+        return [value.strip() for value in self.oidc_scopes.split() if value.strip()]
 
     @property
     def cors_origins(self) -> list[str]:
@@ -217,12 +265,24 @@ class Settings(BaseSettings):
         return self.upload_max_file_size_mb * 1024 * 1024
 
     @property
+    def redis_dsn(self) -> str:
+        return self.reveal(self.redis_url) or ""
+
+    @property
+    def database_dsn(self) -> str:
+        return self.reveal(self.database_url) or ""
+
+    @property
+    def langgraph_database_dsn(self) -> str | None:
+        return self.reveal(self.langgraph_database_url)
+
+    @property
     def effective_celery_broker_url(self) -> str:
-        return self.celery_broker_url or self.redis_url
+        return self.reveal(self.celery_broker_url) or self.redis_dsn
 
     @property
     def effective_celery_result_backend(self) -> str:
-        return self.celery_result_backend or self.redis_url
+        return self.reveal(self.celery_result_backend) or self.redis_dsn
 
     @property
     def allowed_models(self) -> set[str]:
@@ -293,6 +353,10 @@ class Settings(BaseSettings):
             key_length = len(raw_checkpoint_key.encode("utf-8"))
             if key_length not in {16, 24, 32}:
                 raise ValueError("LANGGRAPH_AES_KEY must be 16, 24, or 32 UTF-8 bytes")
+        if self.oidc_session_encryption_key:
+            oidc_key = self.reveal(self.oidc_session_encryption_key) or ""
+            if len(oidc_key.encode("utf-8")) != 32:
+                raise ValueError("OIDC_SESSION_ENCRYPTION_KEY must be exactly 32 UTF-8 bytes")
         secure_oidc_algorithms = {"RS256", "RS384", "RS512", "ES256", "ES384", "ES512"}
         if self.oidc_enabled:
             if not self.oidc_issuer_url or not self.oidc_client_id or not self.oidc_audience:
@@ -304,41 +368,114 @@ class Settings(BaseSettings):
                 secure_oidc_algorithms
             ):
                 raise ValueError("OIDC_ALLOWED_ALGORITHMS must contain only secure asymmetric algorithms")
-        if self.is_production:
+        if self.is_deployed:
             if "*" in self.cors_origins:
-                raise ValueError("CORS wildcard is forbidden in production")
+                raise ValueError("CORS wildcard is forbidden in staging/production")
             if not self.auth_enabled:
-                raise ValueError("AUTH_ENABLED must be true in production")
+                raise ValueError("AUTH_ENABLED must be true in staging/production")
             if not self.oidc_enabled:
-                raise ValueError("OIDC_ENABLED must be true in production")
+                raise ValueError("OIDC_ENABLED must be true in staging/production")
+            if not self.oidc_issuer_url or not self.oidc_issuer_url.lower().startswith("https://"):
+                raise ValueError("OIDC_ISSUER_URL must use HTTPS in staging/production")
+            if not self.oidc_client_secret:
+                raise ValueError("OIDC_CLIENT_SECRET is required in staging/production")
+            _validate_deployed_secret(
+                "OIDC_CLIENT_SECRET",
+                self.reveal(self.oidc_client_secret),
+                minimum_length=24,
+            )
+            if not self.oidc_redirect_uri or not self.oidc_redirect_uri.lower().startswith("https://"):
+                raise ValueError("OIDC_REDIRECT_URI must use HTTPS in staging/production")
+            if "openid" not in self.oidc_scope_values:
+                raise ValueError("OIDC_SCOPES must include openid")
+            if not self.oidc_session_encryption_key:
+                raise ValueError("OIDC_SESSION_ENCRYPTION_KEY is required in staging/production")
+            _validate_deployed_secret(
+                "OIDC_SESSION_ENCRYPTION_KEY",
+                self.reveal(self.oidc_session_encryption_key),
+                minimum_length=32,
+            )
+            if self.log_sensitive_content:
+                raise ValueError("LOG_SENSITIVE_CONTENT must be false in staging/production")
             if self.task_backend == "memory":
-                raise ValueError("TASK_BACKEND=memory is forbidden in production")
+                raise ValueError("TASK_BACKEND=memory is forbidden in staging/production")
             if not self.redis_enabled:
-                raise ValueError("REDIS_ENABLED must be true in production")
+                raise ValueError("REDIS_ENABLED must be true in staging/production")
+            _validate_deployed_secret(
+                "REDIS_URL password",
+                _url_password(self.redis_dsn),
+                minimum_length=24,
+            )
             if not self.task_queue_enabled:
-                raise ValueError("TASK_QUEUE_ENABLED must be true in production")
+                raise ValueError("TASK_QUEUE_ENABLED must be true in staging/production")
             if not self.database_enabled:
-                raise ValueError("DATABASE_ENABLED must be true in production")
-            if self.database_url.lower().startswith("sqlite"):
-                raise ValueError("SQLite is forbidden in production; use PostgreSQL")
+                raise ValueError("DATABASE_ENABLED must be true in staging/production")
+            if self.database_dsn.lower().startswith("sqlite"):
+                raise ValueError("SQLite is forbidden in staging/production; use PostgreSQL")
+            _validate_deployed_secret(
+                "DATABASE_URL password",
+                _url_password(self.database_dsn),
+                minimum_length=24,
+            )
             if self.langgraph_checkpointer != "postgres":
-                raise ValueError("LANGGRAPH_CHECKPOINTER=postgres is required in production")
-            if not self.langgraph_database_url:
-                raise ValueError("LANGGRAPH_DATABASE_URL is required in production")
+                raise ValueError("LANGGRAPH_CHECKPOINTER=postgres is required in staging/production")
+            if not self.langgraph_database_dsn:
+                raise ValueError("LANGGRAPH_DATABASE_URL is required in staging/production")
+            _validate_deployed_secret(
+                "LANGGRAPH_DATABASE_URL password",
+                _url_password(self.langgraph_database_dsn),
+                minimum_length=24,
+            )
             if not self.langgraph_aes_key:
-                raise ValueError("LANGGRAPH_AES_KEY is required to encrypt production checkpoints")
+                raise ValueError("LANGGRAPH_AES_KEY is required to encrypt deployed checkpoints")
+            _validate_deployed_secret(
+                "LANGGRAPH_AES_KEY",
+                self.reveal(self.langgraph_aes_key),
+                minimum_length=32,
+            )
             if not self.knowledge_base_filter_enabled:
-                raise ValueError("KNOWLEDGE_BASE_FILTER_ENABLED must be true in production")
+                raise ValueError("KNOWLEDGE_BASE_FILTER_ENABLED must be true in staging/production")
             if not self.llm_allowed_models.strip():
-                raise ValueError("LLM_ALLOWED_MODELS must define an explicit production whitelist")
+                raise ValueError("LLM_ALLOWED_MODELS must define an explicit deployed whitelist")
+            if self.openai_base_url and not self.openai_base_url.lower().startswith("https://"):
+                raise ValueError("OPENAI_BASE_URL must use HTTPS in staging/production")
+            if self.openai_api_key:
+                _validate_deployed_secret(
+                    "OPENAI_API_KEY",
+                    self.reveal(self.openai_api_key),
+                    minimum_length=20,
+                )
+            if self.mineru_api_token:
+                _validate_deployed_secret(
+                    "MINERU_API_TOKEN",
+                    self.reveal(self.mineru_api_token),
+                    minimum_length=20,
+                )
+            for role_name in ("admin", "user", "readonly"):
+                for api_key in self.api_keys_for_role(role_name):
+                    _validate_deployed_secret(
+                        f"{role_name.upper()}_API_KEYS entry",
+                        api_key,
+                        minimum_length=32,
+                    )
             if not self.minio_enabled:
-                raise ValueError("MINIO_ENABLED must be true in production")
+                raise ValueError("MINIO_ENABLED must be true in staging/production")
             if not self.minio_access_key or not self.minio_secret_key:
-                raise ValueError("MINIO_ACCESS_KEY and MINIO_SECRET_KEY are required in production")
+                raise ValueError("MINIO_ACCESS_KEY and MINIO_SECRET_KEY are required when deployed")
+            _validate_deployed_secret(
+                "MINIO_ACCESS_KEY",
+                self.reveal(self.minio_access_key),
+                minimum_length=16,
+            )
+            _validate_deployed_secret(
+                "MINIO_SECRET_KEY",
+                self.reveal(self.minio_secret_key),
+                minimum_length=32,
+            )
             if self.minio_public_read:
-                raise ValueError("MINIO_PUBLIC_READ is forbidden in production")
+                raise ValueError("MINIO_PUBLIC_READ is forbidden in staging/production")
             if not self.minio_public_secure:
-                raise ValueError("MINIO_PUBLIC_SECURE=true is required in production")
+                raise ValueError("MINIO_PUBLIC_SECURE=true is required in staging/production")
         return self
 
 

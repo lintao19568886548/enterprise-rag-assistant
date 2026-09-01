@@ -34,6 +34,9 @@ def test_staging_compose_has_private_dependencies_and_independent_workers():
     assert "--queues=evaluation" in services["evaluation-worker"]["command"]
     assert compose["networks"]["backend"]["internal"] is True
     assert services["minio"]["environment"]["MINIO_ROOT_PASSWORD"].startswith("${MINIO_SECRET_KEY:?")
+    assert services["redis"]["environment"]["REDIS_PASSWORD"].startswith("${REDIS_PASSWORD:?")
+    assert "--requirepass" in " ".join(services["redis"]["command"])
+    assert "REDISCLI_AUTH" in services["redis"]["healthcheck"]["test"][1]
     assert "minioadmin" not in raw
     assert "change-this" not in raw
     assert services["prometheus"]["networks"] == ["backend"]
