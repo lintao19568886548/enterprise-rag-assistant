@@ -9,7 +9,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-import uvicorn
 from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -23,6 +22,7 @@ from app.core.health import create_health_router
 from app.core.logger import logger
 from app.core.middleware import install_common_api_features
 from app.core.security import RequireAdmin, RequireEditor, RequireReadonly
+from app.core.server import run_api
 from app.core.settings import settings
 from app.import_process.agent.kb_import_workflow import get_default_import_workflow
 from app.import_process.services.import_runner import run_import_graph
@@ -575,4 +575,4 @@ async def rebuild_document(
 
 
 if __name__ == "__main__":
-    uvicorn.run(app=app, host=settings.api_host, port=settings.import_service_port)
+    run_api(app, host=settings.api_host, port=settings.import_service_port)

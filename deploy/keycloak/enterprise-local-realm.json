@@ -18,14 +18,16 @@
       "directAccessGrantsEnabled": false,
       "serviceAccountsEnabled": false,
       "redirectUris": [
-        "http://127.0.0.1:8001/auth/callback"
+        "http://127.0.0.1:8001/auth/callback",
+        "http://127.0.0.1:18001/auth/callback"
       ],
       "webOrigins": [
-        "http://127.0.0.1:8001"
+        "http://127.0.0.1:8001",
+        "http://127.0.0.1:18001"
       ],
       "attributes": {
         "pkce.code.challenge.method": "S256",
-        "post.logout.redirect.uris": "http://127.0.0.1:8001/*"
+        "post.logout.redirect.uris": "http://127.0.0.1:8001/*##http://127.0.0.1:18001/*"
       },
       "protocol": "openid-connect",
       "protocolMappers": [
@@ -48,6 +50,7 @@
       "id": "11111111-1111-4111-8111-111111111111",
       "username": "oidc-local-admin",
       "enabled": true,
+      "email": "oidc-local-admin@example.test",
       "emailVerified": true,
       "firstName": "Local",
       "lastName": "Administrator",
