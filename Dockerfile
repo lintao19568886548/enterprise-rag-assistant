@@ -3,13 +3,17 @@ FROM ghcr.io/astral-sh/uv:python3.11-bookworm-slim AS builder
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     UV_LINK_MODE=copy \
+    UV_CACHE_DIR=/root/.cache/uv \
+    UV_HTTP_RETRIES=8 \
+    UV_HTTP_TIMEOUT=120 \
     PATH="/app/.venv/bin:$PATH" \
     HOME="/home/appuser"
 
 WORKDIR /app
 
 COPY pyproject.toml uv.lock ./
-RUN uv sync --frozen --no-dev --no-install-project
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-dev --no-install-project
 
 FROM python:3.11-slim-bookworm AS runtime
 

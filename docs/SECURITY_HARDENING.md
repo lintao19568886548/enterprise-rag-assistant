@@ -47,11 +47,11 @@ platform entries) and found zero known vulnerabilities. Because Linux uses
 `torch==2.13.0+cpu`, both local acceptance and CI provide the official PyTorch CPU index to
 `pip-audit`; otherwise pip cannot resolve the locked local-version wheel.
 
-The final local acceptance image was built from `python:3.11-slim-bookworm` with security updates,
-CPU-only PyTorch and UID/GID `10001:10001`. It is approximately 2.39 GB unpacked (506,763,228
-bytes of Docker content), and its writable data/log/output/model directories were verified under
-the non-root user. Syft generated a 4,028-component CycloneDX SBOM. Trivy found 5 critical,
-21 high, 97 medium, 103 low and 10 unknown findings. None of the high/critical findings currently
+The current pre-merge image `enterprise-rag-premerge:10b9beb` was built from
+`python:3.11-slim-bookworm` with security updates, CPU-only PyTorch, OCI revision
+`10b9beba6de000dd9308a93560945b182a3ee79b` and UID/GID `10001:10001`. A read-only runtime import
+passed under the non-root user. Syft generated a 4,026-component CycloneDX SBOM. Trivy found 5
+critical and 21 high findings. None of the high/critical findings currently
 has an available fixed version. The five critical Debian findings are retained in the machine-
 readable report rather than ignored: one `zlib1g`, one `libsqlite3-0`, and three `perl-base`
 advisories. Production release remains blocked until a patched base is available or the security

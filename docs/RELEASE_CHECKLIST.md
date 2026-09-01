@@ -2,6 +2,9 @@
 
 This checklist is fail-closed. An unchecked blocking item prevents production release.
 
+Latest engineering evidence is in `docs/PRE_MERGE_ACCEPTANCE.md`. Current decision:
+**conditionally ready for pull-request review; blocked for production release**.
+
 ## Identity, data, and security
 
 - [ ] Previously exposed DashScope key revoked; replacement exists only in the target secret store.
@@ -37,3 +40,14 @@ This checklist is fail-closed. An unchecked blocking item prevents production re
 - [ ] Last known-good image digest, database backup, Milvus alias/collection, and rollback commands
       are recorded before rollout.
 - [ ] Production deployment and release publication have explicit human approval.
+
+## Current blocker owners
+
+| Blocker | Required owner/action |
+|---|---|
+| Exposed DashScope key | Account owner completes `docs/KEY_ROTATION_CHECKLIST.md` |
+| 70 pending evaluation rows | Business and security experts complete `docs/HUMAN_EVALUATION_GUIDE.md` |
+| 5 critical / 21 high unfixed image findings | Security owner records a time-bounded decision or waits for patched packages |
+| Real enterprise OIDC | Identity owner provides target IdP parameters and participates in acceptance |
+| Target online/load evidence | Release owner approves SLOs and staging window after the preceding blockers close |
+| Merge/deploy/release | Explicit human approval for each separate state change |
