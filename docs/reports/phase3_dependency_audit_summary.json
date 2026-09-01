@@ -1,0 +1,15 @@
+{
+  "executed_at": "2026-09-01T09:40:00+08:00",
+  "tool": "pip-audit 2.9.0",
+  "input": "uv export --frozen --no-dev --no-hashes",
+  "dependencies_audited": 176,
+  "known_vulnerabilities": 0,
+  "exit_code": 0,
+  "passed": true,
+  "notes": [
+    "The first scan found five advisories in transformers 4.57.6 and setuptools 81.0.0.",
+    "The lock was upgraded to transformers 5.16.1 and setuptools 83.0.0 before this passing scan.",
+    "The final container SBOM contains 4028 components.",
+    "Trivy found 5 critical and 21 high findings; none has an available fixed version, so production release remains blocked pending a patched base or explicit security-owner risk decision."
+  ]
+}
