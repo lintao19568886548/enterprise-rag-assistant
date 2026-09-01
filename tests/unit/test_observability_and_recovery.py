@@ -1,10 +1,9 @@
 import json
 
 from fastapi.testclient import TestClient
-from pydantic import SecretStr
 
 from app.core.logger import redact_log_text, redact_log_value
-from app.import_process.api.file_import_service import app as import_app, settings as import_settings
+from app.import_process.api.file_import_service import app as import_app
 from scripts.recovery_drill_sqlite import run_drill
 
 
@@ -42,10 +41,7 @@ def test_nested_structured_credentials_are_redacted():
     assert redacted["safe"] == "visible"
 
 
-def test_metrics_expose_enterprise_observability_contract(monkeypatch):
-    monkeypatch.setattr(import_settings, "openai_api_key", SecretStr("sk-test-not-a-real-key"))
-    monkeypatch.setattr(import_settings, "openai_base_url", "https://example.invalid/v1")
-    monkeypatch.setattr(import_settings, "mineru_api_token", SecretStr("test-not-a-real-token"))
+def test_metrics_expose_enterprise_observability_contract():
     with TestClient(import_app) as client:
         client.get("/health/live")
         response = client.get("/metrics")
