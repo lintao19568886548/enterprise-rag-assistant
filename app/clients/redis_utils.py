@@ -19,7 +19,7 @@ def get_redis_client() -> Redis:
     if not settings.redis_enabled:
         raise RedisUnavailableError("Redis is disabled by REDIS_ENABLED=False")
     client = Redis.from_url(
-        settings.redis_url,
+        settings.redis_dsn,
         decode_responses=True,
         socket_connect_timeout=settings.health_dependency_timeout_seconds,
         socket_timeout=settings.health_dependency_timeout_seconds,
@@ -38,7 +38,7 @@ def get_async_redis_client() -> AsyncRedis:
     if not settings.redis_enabled:
         raise RedisUnavailableError("Redis is disabled by REDIS_ENABLED=False")
     return AsyncRedis.from_url(
-        settings.redis_url,
+        settings.redis_dsn,
         decode_responses=True,
         socket_connect_timeout=settings.health_dependency_timeout_seconds,
         socket_timeout=settings.health_dependency_timeout_seconds,

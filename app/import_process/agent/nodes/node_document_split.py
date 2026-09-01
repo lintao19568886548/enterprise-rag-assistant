@@ -120,6 +120,7 @@ class NodeDocumentSplit(NodeBase):
                     "knowledge_base_id": state.get("knowledge_base_id", ""),
                     "document_id": state.get("document_id", ""),
                     "document_version": state.get("document_version", 1),
+                    "task_id": state.get("task_id", ""),
                     "file_name": state.get("original_filename") or file_title,
                     "section_title": section_title,
                     "parent_chunk_id": section.get("parent_chunk_id"),

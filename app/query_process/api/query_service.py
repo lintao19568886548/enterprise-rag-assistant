@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+import time
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-import uvicorn
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
@@ -14,13 +14,18 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 
 from app.clients.mongo_history_utils import clear_history, get_recent_messages
+from app.api.admin_router import router as admin_router
+from app.api.auth_router import router as auth_router
 from app.api.knowledge_router import router as knowledge_router
 from app.core.errors import AppError, ErrorCode, classify_exception
 from app.core.health import create_health_router
 from app.core.logger import logger
+from app.core.metrics import QUERY_END_TO_END_LATENCY
 from app.core.middleware import install_common_api_features
 from app.core.security import RequireAdmin, RequireReadonly, RequireUser
+from app.core.server import run_api
 from app.core.settings import settings
+from app.core.tenant_context import identity_context
 from app.db.repositories import (
     DEFAULT_KNOWLEDGE_BASE_ID,
     DEFAULT_TENANT_ID,
@@ -30,7 +35,9 @@ from app.db.repositories import (
     get_accessible_knowledge_base,
     get_chat_session,
     get_import_task_document,
+    set_message_feedback,
 )
+from app.db.identity_repositories import add_audit_log
 from app.db.session import init_database
 from app.query_process.agent.kb_query_workflow import get_default_query_workflow
 from app.query_process.agent.state import create_default_state
@@ -67,11 +74,20 @@ app.add_middleware(
     allow_origins=settings.cors_origins,
     allow_credentials=settings.cors_allow_credentials,
     allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
-    allow_headers=["Accept", "Authorization", "Content-Type", "X-API-Key", "X-Request-ID"],
+    allow_headers=[
+        "Accept",
+        "Authorization",
+        "Content-Type",
+        "X-API-Key",
+        "X-Request-ID",
+        "X-Trace-ID",
+    ],
 )
 install_common_api_features(app, "query")
 app.include_router(create_health_router("query"))
 app.include_router(knowledge_router)
+app.include_router(admin_router)
+app.include_router(auth_router)
 
 
 @app.get("/chat.html", response_class=FileResponse)
@@ -166,6 +182,10 @@ class QueryRequest(BaseModel):
         return value
 
 
+class FeedbackRequest(BaseModel):
+    feedback: str = Field(pattern=r"^(helpful|unhelpful|cleared)$")
+
+
 @app.post("/query")
 async def query(
     background_tasks: BackgroundTasks,
@@ -251,11 +271,44 @@ async def query(
         ),
         "model": get_task_result(session_id, "model", ""),
         "latency_ms": get_task_result(session_id, "latency_ms", 0),
+        "model_latency_ms": get_task_result(session_id, "model_latency_ms", 0),
+        "total_latency_ms": get_task_result(session_id, "total_latency_ms", 0),
+        "local_latency_ms": get_task_result(session_id, "local_latency_ms", 0),
+        "input_tokens": get_task_result(session_id, "input_tokens", 0),
+        "output_tokens": get_task_result(session_id, "output_tokens", 0),
+        "total_tokens": get_task_result(session_id, "total_tokens", 0),
+        "cost": get_task_result(session_id, "cost", 0.0),
+        "message_id": get_task_result(session_id, "message_id", ""),
         "done_list": [],
     }
 
 
 def run_query_graph(
+    session_id: str,
+    user_query: str,
+    knowledge_base_id: str = DEFAULT_KNOWLEDGE_BASE_ID,
+    is_stream: bool = True,
+    user_id: str = DEFAULT_USER_ID,
+    tenant_id: str = DEFAULT_TENANT_ID,
+) -> None:
+    with identity_context(tenant_id=tenant_id, user_id=user_id):
+        with logger.contextualize(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            session_id=session_id,
+            knowledge_base_id=knowledge_base_id,
+        ):
+            _run_query_graph_in_context(
+                session_id,
+                user_query,
+                knowledge_base_id,
+                is_stream,
+                user_id,
+                tenant_id,
+            )
+
+
+def _run_query_graph_in_context(
     session_id: str,
     user_query: str,
     knowledge_base_id: str = DEFAULT_KNOWLEDGE_BASE_ID,
@@ -271,10 +324,17 @@ def run_query_graph(
         user_id=user_id,
         tenant_id=tenant_id,
     )
+    started = time.perf_counter()
+    status = "success"
     try:
         get_default_query_workflow().run(state)
+        total_latency_ms = int((time.perf_counter() - started) * 1000)
+        model_latency_ms = int(get_task_result(session_id, "model_latency_ms", 0) or 0)
+        set_task_result(session_id, "total_latency_ms", total_latency_ms)
+        set_task_result(session_id, "local_latency_ms", max(0, total_latency_ms - model_latency_ms))
         update_task_status(session_id, TASK_STATUS_COMPLETED, is_stream)
     except Exception as exc:
+        status = "error"
         error_code = classify_exception(exc)
         logger.opt(exception=True).error("[{}] 问答工作流失败：{}", session_id, exc)
         set_task_result(session_id, "error", str(error_code))
@@ -285,6 +345,8 @@ def run_query_graph(
                 SSEEvent.ERROR,
                 {"code": error_code, "error": "问答流程执行失败"},
             )
+    finally:
+        QUERY_END_TO_END_LATENCY.labels(status).observe(time.perf_counter() - started)
 
 
 @app.get("/stream/{session_id}")
@@ -346,6 +408,7 @@ async def history(
                     "citations": record.get("citations", []),
                     "model": record.get("model"),
                     "latency_ms": record.get("latency_ms"),
+                    "feedback": record.get("feedback"),
                     "ts": record.get("ts"),
                 }
                 for record in records
@@ -356,6 +419,38 @@ async def history(
     except Exception as exc:
         logger.opt(exception=True).error("[{}] 历史记录读取失败：{}", session_id, exc)
         raise AppError(ErrorCode.INTERNAL_ERROR, "历史记录读取失败", status_code=503) from exc
+
+
+@app.post("/messages/{message_id}/feedback")
+async def submit_feedback(
+    message_id: str,
+    payload: FeedbackRequest,
+    request: Request,
+    principal: RequireUser,
+):
+    try:
+        record = await run_in_threadpool(
+            set_message_feedback,
+            message_id,
+            payload.feedback,
+            tenant_id=principal.tenant_id,
+            user_id=principal.user_id,
+        )
+    except LookupError as exc:
+        raise AppError(ErrorCode.RESOURCE_NOT_FOUND, "回答消息不存在", status_code=404) from exc
+    add_audit_log(
+        tenant_id=principal.tenant_id,
+        actor_id=principal.user_id,
+        actor_type="user",
+        event_type="answer.feedback_updated",
+        outcome="success",
+        resource_type="chat_message",
+        resource_id=record.id,
+        metadata={"feedback": record.feedback or "cleared"},
+        request_id=getattr(request.state, "request_id", None),
+        trace_id=getattr(request.state, "trace_id", None),
+    )
+    return {"message_id": record.id, "feedback": record.feedback}
 
 
 @app.delete("/history/{session_id}")
@@ -372,4 +467,4 @@ async def clear_chat_history(session_id: str, principal: RequireAdmin):
 
 
 if __name__ == "__main__":
-    uvicorn.run(app, host=settings.api_host, port=settings.query_service_port)
+    run_api(app, host=settings.api_host, port=settings.query_service_port)

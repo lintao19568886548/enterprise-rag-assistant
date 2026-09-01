@@ -23,4 +23,8 @@ celery_app.conf.update(
     worker_prefetch_multiplier=1,
     result_expires=settings.task_ttl_seconds,
     broker_connection_retry_on_startup=True,
+    task_routes={
+        "knowledge_base.import_document": {"queue": "import"},
+        "knowledge_base.cleanup_document": {"queue": "cleanup"},
+    },
 )

@@ -9,18 +9,20 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-import uvicorn
-from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
 from app.api.knowledge_router import router as knowledge_router
+from app.api.admin_router import router as admin_router
+from app.api.auth_router import router as auth_router
 from app.clients.minio_utils import get_minio_client
 from app.core.errors import AppError, ErrorCode
 from app.core.health import create_health_router
 from app.core.logger import logger
 from app.core.middleware import install_common_api_features
-from app.core.security import RequireAdmin, RequireReadonly
+from app.core.security import RequireAdmin, RequireEditor, RequireReadonly
+from app.core.server import run_api
 from app.core.settings import settings
 from app.import_process.agent.kb_import_workflow import get_default_import_workflow
 from app.import_process.services.import_runner import run_import_graph
@@ -39,6 +41,7 @@ from app.db.repositories import (
     set_document_object_path,
     update_import_task,
 )
+from app.db.identity_repositories import add_audit_log
 from app.db.session import init_database
 from app.utils.path_util import PROJECT_ROOT
 from app.utils.task_utils import (
@@ -80,11 +83,20 @@ app.add_middleware(
     allow_origins=settings.cors_origins,
     allow_credentials=settings.cors_allow_credentials,
     allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
-    allow_headers=["Accept", "Authorization", "Content-Type", "X-API-Key", "X-Request-ID"],
+    allow_headers=[
+        "Accept",
+        "Authorization",
+        "Content-Type",
+        "X-API-Key",
+        "X-Request-ID",
+        "X-Trace-ID",
+    ],
 )
 install_common_api_features(app, "import")
 app.include_router(create_health_router("import"))
 app.include_router(knowledge_router)
+app.include_router(admin_router)
+app.include_router(auth_router)
 
 
 @app.get("/import.html", response_class=FileResponse)
@@ -92,6 +104,14 @@ async def get_import_page():
     html_path = PROJECT_ROOT / "app" / "import_process" / "page" / "import.html"
     if not html_path.exists():
         raise HTTPException(status_code=404, detail="import.html page not found")
+    return FileResponse(path=html_path, media_type="text/html")
+
+
+@app.get("/admin.html", response_class=FileResponse)
+async def get_admin_page():
+    html_path = PROJECT_ROOT / "app" / "import_process" / "page" / "admin.html"
+    if not html_path.exists():
+        raise HTTPException(status_code=404, detail="admin.html page not found")
     return FileResponse(path=html_path, media_type="text/html")
 
 
@@ -117,6 +137,28 @@ def _upload_to_minio(
     return object_name
 
 
+def _audit_request(
+    request: Request,
+    principal,
+    event_type: str,
+    resource_type: str,
+    resource_id: str,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    add_audit_log(
+        tenant_id=principal.tenant_id,
+        actor_id=principal.user_id,
+        actor_type="service_account" if principal.service_account_id else "user",
+        event_type=event_type,
+        outcome="success",
+        resource_type=resource_type,
+        resource_id=resource_id,
+        metadata=metadata,
+        request_id=getattr(request.state, "request_id", None),
+        trace_id=getattr(request.state, "trace_id", None),
+    )
+
+
 @app.post(
     "/upload",
     summary="安全上传文件并启动导入",
@@ -124,7 +166,8 @@ def _upload_to_minio(
 )
 async def upload_files(
     background_tasks: BackgroundTasks,
-    principal: RequireAdmin,
+    request: Request,
+    principal: RequireEditor,
     files: list[UploadFile] = File(...),
     knowledge_base_id: str = Form(default=DEFAULT_KNOWLEDGE_BASE_ID),
 ):
@@ -235,11 +278,24 @@ async def upload_files(
             from app.worker.tasks import import_document_task
 
             import_document_task.apply_async(
-                args=[task_id, str(task_dir), str(saved.path)],
+                args=[
+                    task_id,
+                    str(task_dir),
+                    str(saved.path),
+                    principal.tenant_id,
+                    principal.user_id,
+                ],
                 task_id=task_id,
             )
         else:
-            background_tasks.add_task(run_import_graph, task_id, str(task_dir), str(saved.path))
+            background_tasks.add_task(
+                run_import_graph,
+                task_id,
+                str(task_dir),
+                str(saved.path),
+                principal.tenant_id,
+                principal.user_id,
+            )
         response_files.append(
             {
                 "task_id": task_id,
@@ -251,6 +307,14 @@ async def upload_files(
                 "sha256": saved.sha256,
                 "duplicate": False,
             }
+        )
+        _audit_request(
+            request,
+            principal,
+            "document.import_requested",
+            "document",
+            document_id,
+            {"task_id": task_id, "document_version": document_version},
         )
 
     return {
@@ -325,6 +389,7 @@ async def cancel_task(task_id: str, principal: RequireAdmin):
 async def retry_task(
     task_id: str,
     background_tasks: BackgroundTasks,
+    request: Request,
     principal: RequireAdmin,
 ):
     context = get_import_task_document(task_id)
@@ -385,11 +450,19 @@ async def retry_task(
         from app.worker.tasks import import_document_task
 
         import_document_task.apply_async(
-            args=[task_id, local_dir, local_file_path],
+            args=[task_id, local_dir, local_file_path, principal.tenant_id, principal.user_id],
             task_id=task_id,
         )
     else:
-        background_tasks.add_task(run_import_graph, task_id, local_dir, local_file_path)
+        background_tasks.add_task(
+            run_import_graph,
+            task_id,
+            local_dir,
+            local_file_path,
+            principal.tenant_id,
+            principal.user_id,
+        )
+    _audit_request(request, principal, "document.import_retry_requested", "import_task", task_id)
     return {"task_id": task_id, "status": TASK_STATUS_PENDING, "retried": True}
 
 
@@ -397,6 +470,7 @@ async def retry_task(
 async def rebuild_document(
     document_id: str,
     background_tasks: BackgroundTasks,
+    request: Request,
     principal: RequireAdmin,
 ):
     document = get_document(document_id)
@@ -466,7 +540,13 @@ async def rebuild_document(
         from app.worker.tasks import import_document_task
 
         import_document_task.apply_async(
-            args=[task_id, str(task_dir), str(local_file_path)],
+            args=[
+                task_id,
+                str(task_dir),
+                str(local_file_path),
+                principal.tenant_id,
+                principal.user_id,
+            ],
             task_id=task_id,
         )
     else:
@@ -475,7 +555,17 @@ async def rebuild_document(
             task_id,
             str(task_dir),
             str(local_file_path),
+            principal.tenant_id,
+            principal.user_id,
         )
+    _audit_request(
+        request,
+        principal,
+        "document.rebuild_requested",
+        "document",
+        document.id,
+        {"task_id": task_id, "document_version": document.current_version},
+    )
     return {
         "task_id": task_id,
         "document_id": document.id,
@@ -485,4 +575,4 @@ async def rebuild_document(
 
 
 if __name__ == "__main__":
-    uvicorn.run(app=app, host=settings.api_host, port=settings.import_service_port)
+    run_api(app, host=settings.api_host, port=settings.import_service_port)

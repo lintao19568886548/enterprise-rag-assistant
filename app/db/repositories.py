@@ -6,7 +6,7 @@ import hashlib
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import delete, or_, select
+from sqlalchemy import delete, func, select, update
 
 from app.core.settings import settings
 from app.db.models import (
@@ -17,6 +17,7 @@ from app.db.models import (
     DocumentVersion,
     ImportTask,
     KnowledgeBase,
+    Membership,
     OperationLog,
     Tenant,
     User,
@@ -31,7 +32,7 @@ DEFAULT_TENANT_ID = "00000000-0000-0000-0000-000000000100"
 
 
 def ensure_defaults() -> None:
-    if not settings.database_enabled:
+    if not settings.database_enabled or settings.is_production:
         return
     with session_scope() as session:
         tenant = session.get(Tenant, DEFAULT_TENANT_ID)
@@ -53,6 +54,23 @@ def ensure_defaults() -> None:
                     tenant_id=DEFAULT_TENANT_ID,
                     username="local-admin",
                     role="admin",
+                    enabled=True,
+                )
+            )
+            session.flush()
+        membership = session.scalar(
+            select(Membership).where(
+                Membership.tenant_id == DEFAULT_TENANT_ID,
+                Membership.user_id == DEFAULT_USER_ID,
+            )
+        )
+        if membership is None:
+            session.add(
+                Membership(
+                    id="00000000-0000-0000-0000-000000000002",
+                    tenant_id=DEFAULT_TENANT_ID,
+                    user_id=DEFAULT_USER_ID,
+                    role="tenant_admin",
                     enabled=True,
                 )
             )
@@ -113,18 +131,34 @@ def list_knowledge_bases(
             KnowledgeBase.tenant_id == tenant_id,
             KnowledgeBase.deleted_at.is_(None),
         )
-        if user_id is not None:
-            statement = statement.where(
-                or_(
-                    KnowledgeBase.owner_id == user_id,
-                    KnowledgeBase.permission_scope.in_(("department", "public")),
-                )
-            )
-        return list(
+        records = list(
             session.scalars(
                 statement.order_by(KnowledgeBase.created_at.desc())
             )
         )
+    if user_id is None:
+        return records
+    from app.db.identity_repositories import get_active_membership, has_knowledge_base_grant
+
+    membership = get_active_membership(user_id, tenant_id)
+    if membership is None:
+        return []
+    if membership.role in {"platform_admin", "tenant_admin"}:
+        return records
+    return [
+        record
+        for record in records
+        if record.owner_id == user_id
+        or record.permission_scope in {"department", "public"}
+        or has_knowledge_base_grant(
+            tenant_id=tenant_id,
+            knowledge_base_id=record.id,
+            user_id=user_id,
+            role=membership.role,
+            department_id=membership.department_id,
+            required_permission="read",
+        )
+    ]
 
 
 def get_knowledge_base(knowledge_base_id: str) -> KnowledgeBase | None:
@@ -145,6 +179,21 @@ def get_accessible_knowledge_base(
     if record is None or record.tenant_id != tenant_id:
         return None
     if is_admin or record.owner_id == user_id:
+        return record
+    from app.db.identity_repositories import get_active_membership, has_knowledge_base_grant
+
+    membership = get_active_membership(user_id, tenant_id)
+    if membership is None:
+        return None
+    required_permission = "write" if write else "read"
+    if has_knowledge_base_grant(
+        tenant_id=tenant_id,
+        knowledge_base_id=knowledge_base_id,
+        user_id=user_id,
+        role=membership.role,
+        department_id=membership.department_id,
+        required_permission=required_permission,
+    ):
         return record
     if not write and record.permission_scope in {"department", "public"}:
         return record
@@ -209,6 +258,11 @@ def register_document(
             .order_by(Document.current_version.desc())
         )
         if previous_version is not None:
+            session.execute(
+                update(DocumentVersion)
+                .where(DocumentVersion.document_id == previous_version.id)
+                .values(is_active=False)
+            )
             previous_version.current_version += 1
             previous_version.content_hash = saved.sha256
             previous_version.stored_filename = saved.stored_filename
@@ -217,12 +271,17 @@ def register_document(
             previous_version.status = "pending"
             previous_version.object_storage_path = object_storage_path
             version = DocumentVersion(
+                tenant_id=knowledge_base.tenant_id,
                 document_id=previous_version.id,
                 version=previous_version.current_version,
                 content_hash=saved.sha256,
                 parser_version="mineru-v4",
                 chunk_strategy_version="heading-v1",
                 embedding_model=settings.embedding_model,
+                is_active=True,
+                source_object_path=object_storage_path,
+                source_local_path=str(saved.path),
+                activated_at=datetime.now(UTC),
             )
             session.add(version)
             session.flush()
@@ -243,12 +302,17 @@ def register_document(
         session.add(document)
         session.flush()
         version = DocumentVersion(
+            tenant_id=knowledge_base.tenant_id,
             document_id=document.id,
             version=1,
             content_hash=saved.sha256,
             parser_version="mineru-v4",
             chunk_strategy_version="heading-v1",
             embedding_model=settings.embedding_model,
+            is_active=True,
+            source_object_path=object_storage_path,
+            source_local_path=str(saved.path),
+            activated_at=datetime.now(UTC),
         )
         session.add(version)
         session.flush()
@@ -288,6 +352,14 @@ def set_document_object_path(document_id: str, object_storage_path: str) -> None
         document = session.get(Document, document_id)
         if document is not None:
             document.object_storage_path = object_storage_path
+            version = session.scalar(
+                select(DocumentVersion).where(
+                    DocumentVersion.document_id == document.id,
+                    DocumentVersion.version == document.current_version,
+                )
+            )
+            if version is not None:
+                version.source_object_path = object_storage_path
 
 
 def update_import_task(
@@ -483,6 +555,14 @@ def replace_chunk_metadata(
                     milvus_chunk_id=milvus_id,
                 )
             )
+        version = session.scalar(
+            select(DocumentVersion).where(
+                DocumentVersion.document_id == document_id,
+                DocumentVersion.version == document_version,
+            )
+        )
+        if version is not None:
+            version.chunk_count = len(chunks)
 
 
 def save_chat_message(
@@ -518,11 +598,18 @@ def save_chat_message(
                 raise ValueError("session_id already belongs to another knowledge base")
         message = session.get(ChatMessage, message_id) if message_id else None
         if message is None:
-            kwargs = {"session_id": session_id, "role": role, "text": text}
+            kwargs = {
+                "tenant_id": tenant_id,
+                "session_id": session_id,
+                "role": role,
+                "text": text,
+            }
             if message_id:
                 kwargs["id"] = message_id
             message = ChatMessage(**kwargs)
             session.add(message)
+        elif message.tenant_id != tenant_id:
+            raise PermissionError("message belongs to another tenant")
         message.role = role
         message.text = text
         message.rewritten_query = rewritten_query or ""
@@ -611,10 +698,55 @@ def get_recent_messages(
                 "citations": record.citations,
                 "model": record.model,
                 "latency_ms": record.latency_ms,
+                "feedback": record.feedback,
                 "ts": record.created_at.timestamp() if record.created_at else None,
             }
             for record in records
         ]
+
+
+def set_message_feedback(
+    message_id: str,
+    feedback: str,
+    *,
+    tenant_id: str,
+    user_id: str,
+) -> ChatMessage:
+    if feedback not in {"helpful", "unhelpful", "cleared"}:
+        raise ValueError("invalid feedback")
+    with session_scope() as session:
+        record = session.scalar(
+            select(ChatMessage)
+            .join(ChatSession, ChatSession.id == ChatMessage.session_id)
+            .where(
+                ChatMessage.id == message_id,
+                ChatMessage.tenant_id == tenant_id,
+                ChatMessage.role == "assistant",
+                ChatSession.user_id == user_id,
+            )
+        )
+        if record is None:
+            raise LookupError("assistant message not found")
+        record.feedback = None if feedback == "cleared" else feedback
+        session.flush()
+        return record
+
+
+def get_feedback_statistics(tenant_id: str) -> dict[str, int]:
+    with session_scope() as session:
+        rows = session.execute(
+            select(ChatMessage.feedback, func.count(ChatMessage.id))
+            .where(
+                ChatMessage.tenant_id == tenant_id,
+                ChatMessage.role == "assistant",
+                ChatMessage.feedback.is_not(None),
+            )
+            .group_by(ChatMessage.feedback)
+        ).all()
+    counts = {str(feedback): int(count) for feedback, count in rows}
+    helpful = counts.get("helpful", 0)
+    unhelpful = counts.get("unhelpful", 0)
+    return {"helpful": helpful, "unhelpful": unhelpful, "total": helpful + unhelpful}
 
 
 def clear_history(

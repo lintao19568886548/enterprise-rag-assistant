@@ -14,6 +14,7 @@ class MinIOConfig:
     bucket_name: str # MinIO默认存储桶名（知识库文件专用）
     minio_img_dir: str #Minio存储图片的文件夹
     minio_secure: bool # 是否使用ssl加密 http 还是 https
+    public_secure: bool
     public_read: bool
     presigned_expiry_seconds: int
 
@@ -28,6 +29,7 @@ minio_config = MinIOConfig(
     bucket_name=settings.minio_bucket_name,
     minio_img_dir=settings.minio_img_dir,
     minio_secure=settings.minio_secure,
+    public_secure=settings.minio_public_secure,
     public_read=settings.minio_public_read,
     presigned_expiry_seconds=settings.minio_presigned_expiry_seconds,
 )

@@ -38,6 +38,13 @@ class QueryGraphState(TypedDict, total=False):
     has_sufficient_evidence: bool  # 是否达到生成阈值
     model: str  # 实际使用的生成模型
     latency_ms: int  # 生成耗时
+    model_latency_ms: int  # 模型调用耗时
+    total_latency_ms: int  # 端到端工作流耗时
+    local_latency_ms: int  # 端到端减去模型耗时的近似本地耗时
+    input_tokens: int
+    output_tokens: int
+    total_tokens: int
+    cost: float
 
     # 辅助信息
     item_names: List[str]  # 提取出的商品名称
@@ -68,6 +75,13 @@ graph_default_state: QueryGraphState = {
     "has_sufficient_evidence": False,
     "model": "",
     "latency_ms": 0,
+    "model_latency_ms": 0,
+    "total_latency_ms": 0,
+    "local_latency_ms": 0,
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "total_tokens": 0,
+    "cost": 0.0,
     "item_names": [],
     "rewritten_query": "",
     "history": [],

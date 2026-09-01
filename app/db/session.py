@@ -8,15 +8,43 @@ from pathlib import Path
 from typing import Any
 
 from sqlalchemy import Engine, create_engine, event, text
+from sqlalchemy.engine import Connection
+from sqlalchemy.exc import TimeoutError as SQLAlchemyTimeoutError
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.core.settings import PROJECT_ROOT, settings
+from app.core.tenant_context import (
+    ContextTokens,
+    current_identity_context,
+    reset_identity_context,
+    set_identity_context,
+)
 from app.db.models import Base
+from app.core.metrics import (
+    DATABASE_POOL_CHECKED_OUT,
+    DATABASE_POOL_OVERFLOW,
+    DATABASE_POOL_SIZE,
+    DATABASE_POOL_TIMEOUTS,
+)
+
+
+def _pool_value(engine: Engine, name: str) -> int:
+    value = getattr(engine.pool, name, None)
+    try:
+        return int(value()) if callable(value) else int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def record_database_pool_metrics(engine: Engine) -> None:
+    DATABASE_POOL_SIZE.set(_pool_value(engine, "size"))
+    DATABASE_POOL_CHECKED_OUT.set(_pool_value(engine, "checkedout"))
+    DATABASE_POOL_OVERFLOW.set(max(0, _pool_value(engine, "overflow")))
 
 
 def normalized_database_url() -> str:
-    url = settings.database_url
+    url = settings.database_dsn
     prefix = "sqlite:///./"
     if url.startswith(prefix):
         relative = url[len(prefix) :]
@@ -41,6 +69,13 @@ def get_engine() -> Engine:
             pool_recycle=settings.database_pool_recycle_seconds,
         )
     engine = create_engine(url, **kwargs)
+    record_database_pool_metrics(engine)
+
+    @event.listens_for(engine, "checkout")
+    @event.listens_for(engine, "checkin")
+    def _record_pool_event(*_args: Any) -> None:
+        record_database_pool_metrics(engine)
+
     if url.startswith("sqlite"):
         @event.listens_for(engine, "connect")
         def configure_sqlite(connection, _):
@@ -56,17 +91,66 @@ def get_session_factory() -> sessionmaker[Session]:
     return sessionmaker(bind=get_engine(), expire_on_commit=False, autoflush=False)
 
 
+def apply_postgres_rls_context(
+    connection: Connection,
+    context: dict[str, str | None] | None = None,
+) -> None:
+    """Install fail-closed transaction-local values consumed by RLS policies."""
+    if connection.dialect.name != "postgresql":
+        return
+    values = context or current_identity_context()
+    for setting_name, context_name in (
+        ("app.tenant_id", "tenant_id"),
+        ("app.user_id", "user_id"),
+        ("app.oidc_subject", "oidc_subject"),
+        ("app.oidc_issuer", "oidc_issuer"),
+    ):
+        connection.execute(
+            text("SELECT set_config(:setting_name, :setting_value, true)"),
+            {
+                "setting_name": setting_name,
+                "setting_value": values.get(context_name) or "",
+            },
+        )
+
+
+@event.listens_for(Session, "after_begin")
+def _set_session_rls_context(
+    _session: Session,
+    _transaction: Any,
+    connection: Connection,
+) -> None:
+    apply_postgres_rls_context(connection)
+
+
 @contextmanager
-def session_scope():
+def session_scope(
+    *,
+    tenant_id: str | None = None,
+    user_id: str | None = None,
+):
+    tokens: ContextTokens | None = None
+    if tenant_id is not None or user_id is not None:
+        current = current_identity_context()
+        tokens = set_identity_context(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            oidc_subject=current["oidc_subject"],
+            oidc_issuer=current["oidc_issuer"],
+        )
     session = get_session_factory()()
     try:
         yield session
         session.commit()
-    except Exception:
+    except Exception as exc:
         session.rollback()
+        if isinstance(exc, SQLAlchemyTimeoutError):
+            DATABASE_POOL_TIMEOUTS.inc()
         raise
     finally:
         session.close()
+        if tokens is not None:
+            reset_identity_context(tokens)
 
 
 def init_database() -> None:

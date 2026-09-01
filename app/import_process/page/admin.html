@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>企业 RAG 管理工作台</title>
+  <style>
+    :root{color-scheme:dark;--bg:#070b18;--panel:#0d1629;--line:#1c5263;--cyan:#30e6d1;--text:#e8f4f3;--muted:#96b3ba;--danger:#ff607c;--warn:#ffd166}
+    *{box-sizing:border-box} body{margin:0;background:radial-gradient(circle at top,#10253b 0,var(--bg) 42%);color:var(--text);font:14px/1.45 system-ui,"Microsoft YaHei",sans-serif;min-height:100vh}
+    button,input,select{font:inherit} button,input,select,.button-link{min-height:42px;border-radius:7px;border:1px solid var(--line);background:#081326;color:var(--text);padding:8px 11px}
+    button,.button-link{cursor:pointer;color:var(--cyan)} button:hover,button:focus-visible,.button-link:hover,.button-link:focus-visible{border-color:var(--cyan);outline:2px solid transparent;box-shadow:0 0 0 2px #30e6d133}.button-link{display:inline-flex;align-items:center;text-decoration:none}
+    button.danger{color:#ff9bad;border-color:#823346} button[disabled]{opacity:.5;cursor:not-allowed}
+    .shell{max-width:1440px;margin:auto;padding:20px}.topbar{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:18px}.topbar h1{font-size:clamp(1.35rem,4vw,2rem);margin:0;color:var(--cyan)}
+    .auth{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.auth input{width:min(360px,70vw)}
+    .notice{min-height:26px;padding:6px 10px;border-left:3px solid var(--cyan);color:var(--muted);overflow-wrap:anywhere}.notice.error{border-color:var(--danger);color:#ffb0bd}
+    .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(135px,1fr));gap:10px;margin:14px 0}.card,.panel{background:linear-gradient(145deg,#101c31,#0a1223);border:1px solid var(--line);border-radius:10px}.card{padding:13px}.card strong{display:block;color:var(--cyan);font-size:1.35rem}.card span{color:var(--muted);font-size:.82rem}
+    .tabs{display:flex;gap:6px;overflow-x:auto;padding:3px 0 10px}.tab{white-space:nowrap}.tab[aria-selected="true"]{background:#12394a;border-color:var(--cyan)}
+    .panel{padding:16px;margin-bottom:14px;overflow:hidden}.panel[hidden]{display:none}.panel h2{font-size:1.08rem;color:var(--cyan);margin:0 0 12px}.panel h3{font-size:.95rem;color:var(--warn);margin:15px 0 8px}
+    .form{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px}.form input,.form select{flex:1 1 150px;min-width:0}.list{display:grid;gap:8px}.row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;align-items:center;padding:10px;border:1px solid #173d4c;border-radius:8px;min-width:0}.row-main{min-width:0;overflow-wrap:anywhere}.title{font-weight:650;color:#f5f3a6}.meta{color:var(--muted);font-size:.8rem;margin-top:3px;overflow-wrap:anywhere}.actions{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}.actions select{min-width:125px}
+    .empty{color:var(--muted);padding:12px 2px}.split{display:grid;grid-template-columns:1fr 1fr;gap:12px}.metric{font-variant-numeric:tabular-nums}.secret{border:1px solid var(--warn);padding:10px;border-radius:7px;color:#fff2b4;overflow-wrap:anywhere;margin:8px 0}.scroll{overflow:auto;max-height:520px}.audit-row{font-family:ui-monospace,Consolas,monospace;font-size:.78rem}
+    .sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+    @media(max-width:720px){.shell{padding:10px}.topbar{align-items:flex-start;flex-direction:column}.auth,.auth input,.auth button{width:100%}.split{grid-template-columns:1fr}.panel{padding:12px}.row{grid-template-columns:1fr}.actions{justify-content:flex-start}.actions button,.actions select{flex:1 1 120px}.form>*{flex-basis:100%}}
+    @media(max-width:390px){.shell{padding:8px}.card{padding:10px}.panel{padding:10px}.row{padding:9px}.tabs{max-width:100%}}
+  </style>
+</head>
+<body>
+<main class="shell">
+  <header class="topbar">
+    <div><h1>企业 RAG 管理工作台</h1><div class="meta">租户隔离 · 生命周期 · 审计 · 质量与成本</div></div>
+    <div class="auth">
+      <label class="sr-only" for="credential">API Key 或 Bearer Token</label>
+      <input id="credential" type="password" autocomplete="off" placeholder="开发模式可留空；生产环境输入凭据">
+      <a class="button-link" id="oidcLogin" href="/auth/login?return_to=%2Fadmin.html" hidden>企业登录</a>
+      <button id="oidcLogout" type="button" hidden>退出登录</button>
+      <span id="identityStatus" class="meta">身份：开发模式</span>
+      <button id="refreshAll" type="button">刷新全部</button>
+      <a class="button-link" href="/import.html">文件导入</a>
+    </div>
+  </header>
+  <div id="notice" class="notice" role="status" aria-live="polite">准备加载企业数据…</div>
+  <section id="summaryCards" class="cards" aria-label="关键指标"></section>
+  <nav class="tabs" role="tablist" aria-label="管理模块">
+    <button class="tab" role="tab" aria-selected="true" data-panel="identity">组织与权限</button>
+    <button class="tab" role="tab" aria-selected="false" data-panel="knowledge">知识与版本</button>
+    <button class="tab" role="tab" aria-selected="false" data-panel="operations">任务与补偿</button>
+    <button class="tab" role="tab" aria-selected="false" data-panel="quality">模型与质量</button>
+    <button class="tab" role="tab" aria-selected="false" data-panel="audit">操作审计</button>
+  </nav>
+
+  <section id="identity" class="panel" role="tabpanel">
+    <div class="split">
+      <div><h2>租户</h2><form id="tenantForm" class="form"><input name="slug" required pattern="[a-z0-9][a-z0-9-]{1,62}[a-z0-9]" placeholder="tenant-slug"><input name="name" required maxlength="255" placeholder="租户名称"><button>创建租户</button></form><div id="tenants" class="list"></div></div>
+      <div><h2>部门</h2><form id="departmentForm" class="form"><input name="name" required maxlength="255" placeholder="部门名称"><input name="description" maxlength="2000" placeholder="说明（可选）"><button>创建部门</button></form><div id="departments" class="list"></div></div>
+    </div>
+    <h2>用户、成员与角色</h2>
+    <form id="memberForm" class="form"><input name="username" required maxlength="128" placeholder="用户名"><input name="display_name" maxlength="255" placeholder="显示名"><input name="email" type="email" maxlength="320" placeholder="邮箱"><select name="role"><option>viewer</option><option>editor</option><option>kb_manager</option><option>auditor</option><option>tenant_admin</option></select><button>添加成员</button></form>
+    <div id="members" class="list"></div>
+    <h2>知识库授权</h2>
+    <form id="grantForm" class="form"><select name="knowledge_base_id" id="grantKb" required></select><select name="subject_type"><option value="user">用户</option><option value="department">部门</option><option value="role">角色</option></select><input name="subject_id" required maxlength="128" placeholder="用户/部门 ID 或角色名"><select name="permission"><option>read</option><option>write</option><option>manage</option></select><button>新增授权</button></form>
+    <div id="grants" class="list"></div>
+    <h2>服务账户</h2>
+    <form id="serviceForm" class="form"><input name="name" required maxlength="128" placeholder="服务账户名称"><select name="role"><option>viewer</option><option>editor</option><option>kb_manager</option><option>auditor</option><option>tenant_admin</option></select><button>创建服务账户</button></form>
+    <div id="oneTimeSecret" hidden class="secret" role="alert"></div><div id="services" class="list"></div>
+  </section>
+
+  <section id="knowledge" class="panel" role="tabpanel" hidden>
+    <h2>知识库与文档版本</h2><div class="form"><select id="documentKb"></select><button id="loadDocuments" type="button">加载文档</button></div><div id="documents" class="list"></div><div id="versions" class="list"></div>
+  </section>
+
+  <section id="operations" class="panel" role="tabpanel" hidden>
+    <div class="split"><div><h2>导入与失败任务</h2><div id="tasks" class="list scroll"></div></div><div><h2>删除补偿任务</h2><div id="cleanup" class="list scroll"></div></div></div>
+  </section>
+
+  <section id="quality" class="panel" role="tabpanel" hidden>
+    <div class="split"><div><h2>模型与成本统计</h2><div id="modelStats" class="list"></div></div><div><h2>用户反馈统计</h2><div id="feedbackStats" class="list"></div></div></div>
+    <h2>RAG 评测报告</h2><div id="evaluationStats" class="list"></div>
+  </section>
+
+  <section id="audit" class="panel" role="tabpanel" hidden><h2>不可变操作审计</h2><div id="audits" class="list scroll"></div></section>
+</main>
+<script>
+  'use strict';
+  const $=id=>document.getElementById(id), API=location.origin, credential=$('credential');
+  credential.value=sessionStorage.getItem('enterprise_admin_credential')||'';
+  const safe=v=>String(v??'');
+  function authHeaders(json=false){const value=credential.value.trim();const headers={};if(value){if(value.split('.').length===3)headers.Authorization=`Bearer ${value}`;else headers['X-API-Key']=value;}if(json)headers['Content-Type']='application/json';return headers}
+  function submitLogout(){const form=document.createElement('form');form.method='POST';form.action='/auth/logout';document.body.appendChild(form);form.submit()}
+  async function updateIdentity(){try{const configResponse=await fetch('/auth/config'),config=configResponse.ok?await configResponse.json():{enabled:false};if(!config.enabled){$('identityStatus').textContent='身份：开发模式';$('oidcLogin').hidden=true;$('oidcLogout').hidden=true;return}const meResponse=await fetch('/auth/me');if(meResponse.ok){const me=await meResponse.json();$('identityStatus').textContent=`身份：${me.role}`;$('oidcLogin').hidden=true;$('oidcLogout').hidden=false}else{$('identityStatus').textContent='身份：未登录';$('oidcLogin').hidden=false;$('oidcLogout').hidden=true}}catch(_error){$('identityStatus').textContent='身份：状态未知'}}
+  function notice(message,error=false){$('notice').textContent=message;$('notice').classList.toggle('error',error)}
+  async function api(path,options={}){const response=await fetch(`${API}${path}`,{...options,headers:{...authHeaders(Boolean(options.body)),...(options.headers||{})}});let data={};try{data=await response.json()}catch{data={}}if(!response.ok){const code=safe(data.code||data.error_code||response.status);const message=safe(data.message||data.detail||'请求失败');throw new Error(`${code}: ${message}`)}return data}
+  function el(tag,text,className){const node=document.createElement(tag);if(text!==undefined)node.textContent=safe(text);if(className)node.className=className;return node}
+  function clear(id){$(id).replaceChildren()}
+  function empty(id,message='暂无数据'){clear(id);$(id).append(el('div',message,'empty'))}
+  function row(title,meta,actions=[]){const root=el('div',undefined,'row'),main=el('div',undefined,'row-main');main.append(el('div',title,'title'),el('div',meta,'meta'));const group=el('div',undefined,'actions');actions.forEach(action=>group.append(action));root.append(main,group);return root}
+  function button(label,handler,danger=false){const node=el('button',label,danger?'danger':'');node.type='button';node.addEventListener('click',async()=>{try{await handler()}catch(err){notice(err.message||'操作失败',true)}});return node}
+  function formData(form){return Object.fromEntries(new FormData(form).entries())}
+  function requireConfirm(message){return window.confirm(message)}
+  function option(value,label){const node=el('option',label);node.value=value;return node}
+  function renderSummary(summary){clear('summaryCards');const counts=summary.counts||{};const cards=[['知识库',counts.knowledge_bases],['文档',counts.documents],['成员',counts.memberships],['导入任务',counts.import_tasks],['补偿任务',counts.cleanup_jobs],['审计事件',counts.audit_events]];for(const [label,value] of cards){const card=el('div',undefined,'card');card.append(el('strong',value??0),el('span',label));$('summaryCards').append(card)}}
+  async function loadSummary(){const data=await api('/admin/workbench-summary');renderSummary(data);renderQuality(data)}
+  async function loadIdentity(){const [tenants,departments,members,grants,services,kbs]=await Promise.all([api('/admin/tenants'),api('/admin/departments'),api('/admin/memberships'),api('/admin/knowledge-base-grants'),api('/admin/service-accounts'),api('/knowledge-bases')]);renderTenants(tenants.items);renderDepartments(departments.items);renderMembers(members.items);renderGrants(grants.items);renderServices(services.items);renderKbOptions(kbs.items)}
+  function renderTenants(items=[]){clear('tenants');items.forEach(x=>$('tenants').append(row(x.name,`${x.slug} · ${x.enabled?'启用':'停用'} · ${x.id}`)));if(!items.length)empty('tenants')}
+  function renderDepartments(items=[]){clear('departments');items.forEach(x=>$('departments').append(row(x.name,`${x.enabled?'启用':'停用'} · ${x.description||'无说明'} · ${x.id}`)));if(!items.length)empty('departments')}
+  function renderMembers(items=[]){clear('members');for(const x of items){const role=document.createElement('select');['viewer','editor','kb_manager','auditor','tenant_admin','platform_admin'].forEach(v=>role.append(option(v,v)));role.value=x.role;const toggle=button(x.enabled?'禁用':'启用',async()=>{if(x.enabled&&!requireConfirm(`确认禁用成员“${x.username}”吗？`))return;await api(`/admin/memberships/${encodeURIComponent(x.id)}`,{method:'PATCH',body:JSON.stringify({enabled:!x.enabled})});await refreshAll()},x.enabled);const save=button('保存角色',async()=>{if(!requireConfirm(`确认将“${x.username}”角色改为 ${role.value} 吗？`))return;await api(`/admin/memberships/${encodeURIComponent(x.id)}`,{method:'PATCH',body:JSON.stringify({role:role.value})});await refreshAll()});$('members').append(row(x.display_name||x.username,`${x.username} · ${x.email||'无邮箱'} · ${x.department_id||'无部门'} · ${x.id}`,[role,save,toggle]))}if(!items.length)empty('members')}
+  function renderGrants(items=[]){clear('grants');for(const x of items){const revoke=button('撤销授权',async()=>{if(!requireConfirm(`确认撤销授权“${x.id}”（${x.subject_type}:${x.subject_id}）吗？`))return;await api(`/admin/knowledge-base-grants/${encodeURIComponent(x.id)}?confirm=true`,{method:'DELETE'});await loadIdentity()},true);$('grants').append(row(`${x.subject_type}:${x.subject_id}`,`${x.permission} · 知识库 ${x.knowledge_base_id} · ${x.id}`,[revoke]))}if(!items.length)empty('grants')}
+  function renderServices(items=[]){clear('services');for(const x of items){const revoke=button('撤销服务账户',async()=>{if(!requireConfirm(`确认永久撤销服务账户“${x.name}”吗？`))return;await api(`/admin/service-accounts/${encodeURIComponent(x.id)}?confirm=true`,{method:'DELETE'});await loadIdentity()},true);$('services').append(row(x.name,`${x.role} · ${x.enabled?'有效':'已撤销'} · 最近使用 ${x.last_used_at||'从未'} · ${x.id}`,x.enabled?[revoke]:[]))}if(!items.length)empty('services')}
+  function renderKbOptions(items=[]){for(const id of ['grantKb','documentKb']){const select=$(id),selected=select.value;select.replaceChildren();items.forEach(x=>select.append(option(x.id,x.name)));if(items.some(x=>x.id===selected))select.value=selected}}
+  async function loadDocuments(){const kb=$('documentKb').value;if(!kb)return empty('documents','请先选择知识库');const data=await api(`/knowledge-bases/${encodeURIComponent(kb)}/documents`);clear('documents');clear('versions');for(const x of data.items||[]){const versions=button('版本管理',()=>loadVersions(x));const rebuild=button('重新索引',async()=>{if(!requireConfirm(`确认重新索引文档“${x.original_filename}”吗？`))return;await api(`/documents/${encodeURIComponent(x.id)}/rebuild`,{method:'POST'});await loadOperations()});const remove=button('删除文档',async()=>{if(!requireConfirm(`确认删除文档“${x.original_filename}”并启动补偿清理吗？`))return;await api(`/documents/${encodeURIComponent(x.id)}?confirm=true`,{method:'DELETE'});await Promise.all([loadDocuments(),loadOperations()])},true);$('documents').append(row(x.original_filename,`${x.status} · 生命周期 ${x.lifecycle_status} · 当前版本 ${x.current_version} · ${x.id}`,[versions,rebuild,remove]))}if(!(data.items||[]).length)empty('documents')}
+  async function loadVersions(doc){const data=await api(`/documents/${encodeURIComponent(doc.id)}/versions`);clear('versions');$('versions').append(el('h3',`“${doc.original_filename}”的版本`));for(const x of data.items||[]){const actions=[];if(!x.is_active)actions.push(button('回滚到此版本',async()=>{if(!requireConfirm(`确认将文档“${doc.original_filename}”回滚到版本 ${x.version} 吗？系统将先重建再原子切换。`))return;await api(`/documents/${encodeURIComponent(doc.id)}/versions/${x.version}/rollback`,{method:'POST'});await loadOperations()},true));$('versions').append(row(`版本 ${x.version}${x.is_active?'（当前）':''}`,`切片 ${x.chunk_count} · 解析 ${x.parser_version} · 向量 ${x.embedding_model}`,[...actions]))}}
+  async function loadOperations(){const [tasks,cleanup]=await Promise.all([api('/tasks?limit=100'),api('/cleanup-jobs?limit=100')]);clear('tasks');for(const x of tasks.items||[]){const actions=[];if(x.status==='failed')actions.push(button('重试',async()=>{if(!requireConfirm(`确认重试导入任务“${x.id}”吗？`))return;await api(`/tasks/${encodeURIComponent(x.id)}/retry`,{method:'POST'});await loadOperations()}));$('tasks').append(row(x.id,`${x.status} · ${x.progress}% · ${x.current_node||'-'} · ${x.error_code||'无错误码'}`,actions))}if(!(tasks.items||[]).length)empty('tasks');clear('cleanup');for(const x of cleanup.items||[]){const actions=[];if(['RETRYING','DEAD_LETTER'].includes(x.status))actions.push(button('重试补偿',async()=>{if(!requireConfirm(`确认重试删除补偿任务“${x.id}”吗？`))return;await api(`/cleanup-jobs/${encodeURIComponent(x.id)}/retry`,{method:'POST'});await loadOperations()}));$('cleanup').append(row(x.document_id,`${x.status} · 阶段 ${(x.completed_stages||[]).join(',')||'未开始'} · ${x.error_code||'无错误码'} · ${x.id}`,actions))}if(!(cleanup.items||[]).length)empty('cleanup')}
+  function renderQuality(data){const model=data.model||{},feedback=data.feedback||{},evaluation=data.evaluation||{},report=evaluation.report||{};clear('modelStats');$('modelStats').append(row(model.name||'未配置',`输入 ${model.input_tokens||0} token · 输出 ${model.output_tokens||0} token`),row(`$${Number(model.estimated_cost_usd||0).toFixed(6)}`,`单价 输入 $${model.input_cost_per_1m_tokens||0}/M · 输出 $${model.output_cost_per_1m_tokens||0}/M`));clear('feedbackStats');$('feedbackStats').append(row(`共 ${feedback.total||0} 条反馈`,`有帮助 ${feedback.helpful||0} · 无帮助 ${feedback.unhelpful||0}`));clear('evaluationStats');const labels=evaluation.labels||{};$('evaluationStats').append(row(`评测 ${report.passed??0}/${report.total??0}`,`通过率 ${report.pass_rate==null?'未知':(Number(report.pass_rate)*100).toFixed(1)+'%'} · P95 ${report.p95_latency_ms??'-'}ms · ${report.evaluation_mode||'未知模式'}`),row(`已批准 ${labels.approved||0}`,`待业务专家标注 ${labels.needs_human_label||0} · 工作台不会自动批准答案`))}
+  async function loadAudits(){const data=await api('/admin/audit-logs?limit=200');clear('audits');for(const x of data.items||[])$('audits').append(row(`${x.event_type} · ${x.outcome}`,`${x.created_at} · actor ${x.actor_id||'system'} · ${x.resource_type||'-'}:${x.resource_id||'-'} · request ${x.request_id||'-'}`,[el('span',x.trace_id||'','meta audit-row')]));if(!(data.items||[]).length)empty('audits')}
+  async function submit(form,path){const payload=formData(form);await api(path,{method:'POST',body:JSON.stringify(payload)});form.reset();await refreshAll()}
+  $('tenantForm').addEventListener('submit',async e=>{e.preventDefault();try{await submit(e.currentTarget,'/admin/tenants')}catch(err){notice(err.message,true)}});
+  $('departmentForm').addEventListener('submit',async e=>{e.preventDefault();try{await submit(e.currentTarget,'/admin/departments')}catch(err){notice(err.message,true)}});
+  $('memberForm').addEventListener('submit',async e=>{e.preventDefault();try{const payload=formData(e.currentTarget);Object.keys(payload).forEach(k=>{if(payload[k]==='')delete payload[k]});await api('/admin/memberships',{method:'POST',body:JSON.stringify(payload)});e.currentTarget.reset();await refreshAll()}catch(err){notice(err.message,true)}});
+  $('grantForm').addEventListener('submit',async e=>{e.preventDefault();try{await submit(e.currentTarget,'/admin/knowledge-base-grants')}catch(err){notice(err.message,true)}});
+  $('serviceForm').addEventListener('submit',async e=>{e.preventDefault();try{const data=await api('/admin/service-accounts',{method:'POST',body:JSON.stringify(formData(e.currentTarget))});$('oneTimeSecret').hidden=false;$('oneTimeSecret').textContent=`仅显示一次，请立即保存到密钥管理系统：${data.api_key}`;e.currentTarget.reset();await loadIdentity()}catch(err){notice(err.message,true)}});
+  $('loadDocuments').addEventListener('click',()=>loadDocuments().catch(err=>notice(err.message,true)));
+  credential.addEventListener('change',()=>sessionStorage.setItem('enterprise_admin_credential',credential.value));
+  document.querySelectorAll('.tab').forEach(tab=>tab.addEventListener('click',()=>{document.querySelectorAll('.tab').forEach(x=>x.setAttribute('aria-selected',String(x===tab)));document.querySelectorAll('[role="tabpanel"]').forEach(x=>x.hidden=x.id!==tab.dataset.panel)}));
+  async function refreshAll(){notice('正在刷新租户范围内的管理数据…');try{sessionStorage.setItem('enterprise_admin_credential',credential.value);await Promise.all([loadSummary(),loadIdentity(),loadOperations(),loadAudits()]);await loadDocuments();notice('管理数据已刷新')}catch(err){notice(err.message||'刷新失败',true)}}
+  $('oidcLogout').addEventListener('click',submitLogout);$('refreshAll').addEventListener('click',refreshAll);window.addEventListener('DOMContentLoaded',async()=>{await updateIdentity();await refreshAll()});
+</script>
+</body>
+</html>

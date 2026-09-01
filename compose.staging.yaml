@@ -1,0 +1,312 @@
+name: enterprise-rag-staging
+
+x-app-environment: &app-environment
+  APP_ENV: staging
+  API_HOST: 0.0.0.0
+  LOG_JSON: "true"
+  LOG_FILE_ENABLE: "false"
+  AUTH_ENABLED: "true"
+  OIDC_ENABLED: "true"
+  OIDC_ISSUER_URL: ${OIDC_ISSUER_URL:?set OIDC_ISSUER_URL}
+  OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:?set OIDC_CLIENT_ID}
+  OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:?set OIDC_CLIENT_SECRET}
+  OIDC_AUDIENCE: ${OIDC_AUDIENCE:?set OIDC_AUDIENCE}
+  OIDC_REDIRECT_URI: ${OIDC_REDIRECT_URI:?set OIDC_REDIRECT_URI}
+  OIDC_POST_LOGOUT_REDIRECT_URI: ${OIDC_POST_LOGOUT_REDIRECT_URI:-}
+  OIDC_SCOPES: ${OIDC_SCOPES:-openid profile email}
+  OIDC_SESSION_ENCRYPTION_KEY: ${OIDC_SESSION_ENCRYPTION_KEY:?set OIDC_SESSION_ENCRYPTION_KEY}
+  OPENAI_API_KEY: ${OPENAI_API_KEY:?set OPENAI_API_KEY}
+  OPENAI_BASE_URL: ${OPENAI_BASE_URL:?set OPENAI_BASE_URL}
+  MINERU_API_TOKEN: ${MINERU_API_TOKEN:?set MINERU_API_TOKEN}
+  REDIS_ENABLED: "true"
+  REDIS_URL: redis://:${REDIS_PASSWORD:?set REDIS_PASSWORD}@redis:6379/0
+  TASK_BACKEND: redis
+  TASK_QUEUE_ENABLED: "true"
+  CELERY_BROKER_URL: redis://:${REDIS_PASSWORD:?set REDIS_PASSWORD}@redis:6379/1
+  CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD:?set REDIS_PASSWORD}@redis:6379/2
+  CELERY_TASK_MAX_RETRIES: "3"
+  CLEANUP_MAX_RETRIES: "5"
+  CLEANUP_RETRY_BASE_SECONDS: "5"
+  CLEANUP_RETRY_MAX_SECONDS: "600"
+  DATABASE_ENABLED: "true"
+  DATABASE_URL: postgresql+psycopg://knowledge_app:${POSTGRES_RUNTIME_PASSWORD:?set POSTGRES_RUNTIME_PASSWORD}@postgres:5432/${POSTGRES_DB:-knowledge_base}
+  LANGGRAPH_CHECKPOINTER: postgres
+  LANGGRAPH_DATABASE_URL: postgresql://knowledge_app:${POSTGRES_RUNTIME_PASSWORD:?set POSTGRES_RUNTIME_PASSWORD}@postgres:5432/${POSTGRES_DB:-knowledge_base}
+  LANGGRAPH_AES_KEY: ${LANGGRAPH_AES_KEY:?set LANGGRAPH_AES_KEY}
+  MILVUS_URI: http://milvus:19530
+  MILVUS_REQUIRED: "true"
+  CHUNKS_COLLECTION: kb_chunks_active
+  ITEM_NAME_COLLECTION: kb_item_names_active
+  KNOWLEDGE_BASE_FILTER_ENABLED: "true"
+  LLM_ALLOWED_MODELS: ${LLM_ALLOWED_MODELS:-qwen-plus,qwen-vl-plus}
+  MINIO_ENABLED: "true"
+  MINIO_ENDPOINT: minio:9000
+  MINIO_PUBLIC_ENDPOINT: ${STAGING_PUBLIC_HOST:-127.0.0.1}:9443
+  MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:?set MINIO_ACCESS_KEY}
+  MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:?set MINIO_SECRET_KEY}
+  MINIO_PUBLIC_READ: "false"
+  MINIO_SECURE: "false"
+  MINIO_PUBLIC_SECURE: "true"
+  BGE_M3_PATH: ""
+  HF_HOME: /models/huggingface
+  MODELSCOPE_CACHE: /models/modelscope
+
+x-app-service: &app-service
+  build:
+    context: .
+    args:
+      APP_VERSION: ${APP_VERSION:-0.1.0}
+      GIT_SHA: ${GIT_SHA:-unknown}
+      BUILD_TIME: ${BUILD_TIME:-unknown}
+  environment: *app-environment
+  init: true
+  read_only: true
+  tmpfs:
+    - /tmp:size=256m,mode=1777
+  cap_drop: [ALL]
+  security_opt:
+    - no-new-privileges:true
+  stop_grace_period: 45s
+  restart: unless-stopped
+  volumes:
+    - app-output:/app/output
+    - model-cache:/models
+  networks:
+    - backend
+    - edge
+  depends_on:
+    migrate:
+      condition: service_completed_successfully
+    redis:
+      condition: service_healthy
+    milvus:
+      condition: service_healthy
+    minio:
+      condition: service_healthy
+
+services:
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.25
+    command: >-
+      etcd --advertise-client-urls=http://etcd:2379
+      --listen-client-urls=http://0.0.0.0:2379
+      --data-dir=/etcd
+    environment:
+      ETCD_AUTO_COMPACTION_MODE: revision
+      ETCD_AUTO_COMPACTION_RETENTION: "1000"
+      ETCD_QUOTA_BACKEND_BYTES: "4294967296"
+      ETCD_SNAPSHOT_COUNT: "50000"
+    volumes:
+      - etcd-data:/etcd
+    networks: [backend]
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio:RELEASE.2024-12-18T13-15-44Z
+    command: minio server /minio_data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:?set MINIO_ACCESS_KEY}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:?set MINIO_SECRET_KEY}
+    volumes:
+      - minio-data:/minio_data
+    expose: ["9000", "9001"]
+    networks: [backend]
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+    restart: unless-stopped
+
+  milvus:
+    image: milvusdb/milvus:v2.6.22
+    command: ["milvus", "run", "standalone"]
+    security_opt:
+      - seccomp:unconfined
+    environment:
+      ETCD_ENDPOINTS: etcd:2379
+      MINIO_ADDRESS: minio:9000
+      MINIO_ACCESS_KEY_ID: ${MINIO_ACCESS_KEY:?set MINIO_ACCESS_KEY}
+      MINIO_SECRET_ACCESS_KEY: ${MINIO_SECRET_KEY:?set MINIO_SECRET_KEY}
+      MQ_TYPE: woodpecker
+    volumes:
+      - milvus-data:/var/lib/milvus
+    expose: ["19530", "9091"]
+    networks: [backend]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:9091/healthz"]
+      interval: 15s
+      start_period: 90s
+      timeout: 10s
+      retries: 12
+    depends_on:
+      etcd:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    restart: unless-stopped
+
+  redis:
+    image: redis:7.4-bookworm
+    command:
+      - sh
+      - -c
+      - exec redis-server --appendonly yes --save 60 1000 --requirepass "$$REDIS_PASSWORD"
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD}
+    volumes:
+      - redis-data:/data
+    expose: ["6379"]
+    networks: [backend]
+    healthcheck:
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$$REDIS_PASSWORD\" redis-cli ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:17-bookworm
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-knowledge_owner}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-knowledge_base}
+      POSTGRES_RUNTIME_PASSWORD: ${POSTGRES_RUNTIME_PASSWORD:?set POSTGRES_RUNTIME_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./deploy/postgres/init-runtime-role.sh:/docker-entrypoint-initdb.d/10-runtime-role.sh:ro
+    expose: ["5432"]
+    networks: [backend]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  migrate:
+    build:
+      context: .
+      args:
+        APP_VERSION: ${APP_VERSION:-0.1.0}
+        GIT_SHA: ${GIT_SHA:-unknown}
+        BUILD_TIME: ${BUILD_TIME:-unknown}
+    environment:
+      <<: *app-environment
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-knowledge_owner}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-knowledge_base}
+    command: ["alembic", "upgrade", "head"]
+    networks: [backend]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  import-api:
+    <<: *app-service
+    command: ["python", "-m", "app.import_process.api.file_import_service"]
+    expose: ["8000"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+  query-api:
+    <<: *app-service
+    command: ["python", "-m", "app.query_process.api.query_service"]
+    expose: ["8001"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health/ready', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+  import-worker:
+    <<: *app-service
+    command: ["celery", "-A", "app.worker.celery_app:celery_app", "worker", "--loglevel=INFO", "--queues=import", "--concurrency=1", "--max-tasks-per-child=20"]
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A app.worker.celery_app:celery_app inspect ping -d celery@$${HOSTNAME} --timeout=5 | grep -q pong"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  cleanup-worker:
+    <<: *app-service
+    command: ["celery", "-A", "app.worker.celery_app:celery_app", "worker", "--loglevel=INFO", "--queues=cleanup", "--concurrency=1", "--max-tasks-per-child=100"]
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A app.worker.celery_app:celery_app inspect ping -d celery@$${HOSTNAME} --timeout=5 | grep -q pong"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  evaluation-worker:
+    <<: *app-service
+    command: ["celery", "-A", "app.worker.celery_app:celery_app", "worker", "--loglevel=INFO", "--queues=evaluation", "--concurrency=1", "--max-tasks-per-child=10"]
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A app.worker.celery_app:celery_app inspect ping -d celery@$${HOSTNAME} --timeout=5 | grep -q pong"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=30d
+    volumes:
+      - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./deploy/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus-data:/prometheus
+    expose: ["9090"]
+    networks: [backend]
+    depends_on:
+      import-api:
+        condition: service_healthy
+      query-api:
+        condition: service_healthy
+    restart: unless-stopped
+
+  nginx:
+    image: nginx:1.27-alpine
+    volumes:
+      - ./deploy/nginx/nginx.staging.conf:/etc/nginx/nginx.conf:ro
+      - ./deploy/nginx/certs:/etc/nginx/certs:ro
+    ports:
+      - "8443:443"
+      - "8444:444"
+      - "9443:9443"
+    networks:
+      - edge
+      - backend
+    healthcheck:
+      test: ["CMD", "wget", "--no-check-certificate", "-qO-", "https://127.0.0.1/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+    depends_on:
+      import-api:
+        condition: service_healthy
+      query-api:
+        condition: service_healthy
+    restart: unless-stopped
+
+networks:
+  edge:
+  backend:
+    internal: true
+
+volumes:
+  app-output:
+  etcd-data:
+  milvus-data:
+  minio-data:
+  model-cache:
+  postgres-data:
+  prometheus-data:
+  redis-data:

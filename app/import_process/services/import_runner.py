@@ -6,7 +6,13 @@ from app.core.logger import logger
 from app.core.metrics import IMPORT_TASKS
 from app.core.errors import classify_exception
 from app.core.settings import settings
+from app.core.tenant_context import identity_context
+from app.core.tenant_context import current_identity_context
+from app.db.lifecycle_repositories import activate_document_version
+from app.db.identity_repositories import add_audit_log
 from app.db.repositories import (
+    DEFAULT_TENANT_ID,
+    DEFAULT_USER_ID,
     get_document,
     get_import_task,
     replace_chunk_metadata,
@@ -56,7 +62,19 @@ def _safe_error_summary(exc: Exception) -> str:
     return message[:1024]
 
 
-def run_import_graph(task_id: str, local_dir: str, local_file_path: str) -> None:
+def run_import_graph(
+    task_id: str,
+    local_dir: str,
+    local_file_path: str,
+    tenant_id: str = DEFAULT_TENANT_ID,
+    user_id: str = DEFAULT_USER_ID,
+) -> None:
+    with identity_context(tenant_id=tenant_id, user_id=user_id):
+        with logger.contextualize(tenant_id=tenant_id, user_id=user_id, task_id=task_id):
+            _run_import_graph_in_context(task_id, local_dir, local_file_path)
+
+
+def _run_import_graph_in_context(task_id: str, local_dir: str, local_file_path: str) -> None:
     try:
         if get_task_status(task_id) == TASK_STATUS_CANCELLED:
             return
@@ -110,8 +128,28 @@ def run_import_graph(task_id: str, local_dir: str, local_file_path: str) -> None
                 document.knowledge_base_id,
                 list(final_state.get("chunks") or []),
             )
+            if task_record.document_version != document.current_version:
+                identity = current_identity_context()
+                activate_document_version(
+                    document.id,
+                    task_record.document_version,
+                    document.tenant_id,
+                    identity.get("user_id") or "system",
+                )
         update_task_status(task_id, TASK_STATUS_COMPLETED)
         update_import_task(task_id, TASK_STATUS_COMPLETED, current_node="completed", progress=100)
+        if document is not None:
+            identity = current_identity_context()
+            add_audit_log(
+                tenant_id=document.tenant_id,
+                actor_id=identity.get("user_id") or None,
+                actor_type="user" if identity.get("user_id") else "system",
+                event_type="document.import_completed",
+                outcome="success",
+                resource_type="document",
+                resource_id=document.id,
+                metadata={"task_id": task_id, "document_version": task_record.document_version if task_record else None},
+            )
         logger.info("[{}] 导入工作流执行完成", task_id)
         IMPORT_TASKS.labels("completed", "false").inc()
     except Exception as exc:

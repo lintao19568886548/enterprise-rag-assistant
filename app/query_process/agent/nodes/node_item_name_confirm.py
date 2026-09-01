@@ -14,7 +14,7 @@ from app.query_process.agent.node_base import NodeBase
 from app.core.logger import logger
 from app.query_process.agent.state import QueryGraphState, create_default_state
 from app.utils.task_utils import add_done_task
-from app.utils.milvus_utils import escape_milvus_string
+from app.utils.milvus_utils import build_scope_filter
 
 
 class NodeItemNameConfirm(NodeBase):
@@ -72,6 +72,7 @@ class NodeItemNameConfirm(NodeBase):
         if len(item_names) > 0:
             query_results = self._step_5_vectorize_and_query(
                 item_names,
+                state.get("tenant_id"),
                 state.get("knowledge_base_id"),
             )
             align_result = self._step_6_align_item_names(query_results)
@@ -193,6 +194,7 @@ class NodeItemNameConfirm(NodeBase):
     def _step_5_vectorize_and_query(
         self,
         item_names,
+        tenant_id: str | None = None,
         knowledge_base_id: str | None = None,
     ) -> List[Dict]:
         """
@@ -246,12 +248,7 @@ class NodeItemNameConfirm(NodeBase):
 
                 # 构造Milvus混合搜索请求对象，传入稠/稀疏向量，指定返回Top5匹配结果
                 # reqs返回格式：[稠密向量搜索请求, 稀疏向量搜索请求]
-                if not knowledge_base_id:
-                    raise ValueError("knowledge_base_id is required for isolated item lookup")
-                expr = (
-                    f'knowledge_base_id == "{escape_milvus_string(knowledge_base_id)}" '
-                    "and is_active == true"
-                )
+                expr = build_scope_filter(tenant_id, knowledge_base_id)
                 reqs = create_hybrid_search_requests(
                     dense_vector=dense_vector,
                     sparse_vector=sparse_vector,

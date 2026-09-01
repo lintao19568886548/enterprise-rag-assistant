@@ -10,6 +10,7 @@ from app.clients.mongo_history_utils import save_chat_message
 from app.clients.minio_utils import presign_minio_uri
 from app.core.load_prompt import load_prompt
 from app.core.logger import logger
+from app.core.metrics import RAG_CITATIONS, RAG_CONFIDENCE, RAG_EVIDENCE
 from app.core.settings import settings
 from app.lm.lm_utils import get_llm_client
 from app.query_process.agent.node_base import NodeBase
@@ -28,6 +29,12 @@ NO_EVIDENCE_SIGNALS = (
     "无法从参考资料",
     "未提供相关信息",
 )
+SENSITIVE_OUTPUT_PATTERN = re.compile(
+    r"(?i)(system\s+prompt|developer\s+message|系统提示词|开发者指令|"
+    r"<\s*(?:tool|function)_call|\"tool_calls\"\s*:|OPENAI_API_KEY\s*=|"
+    r"authorization\s*:\s*bearer\s+\S+)"
+)
+SECURITY_REFUSAL_ANSWER = "抱歉，安全策略阻止了可能泄露内部指令、凭据或伪造工具调用的回答。"
 
 
 class NodeAnswerOutput(NodeBase):
@@ -51,6 +58,7 @@ class NodeAnswerOutput(NodeBase):
                 prompt = self._construct_prompt(state)
                 state["prompt"] = prompt
                 self._generate_response(state, prompt)
+                self._enforce_generated_output_security(state)
                 self._reconcile_generated_evidence(state)
 
         image_urls = (
@@ -59,10 +67,10 @@ class NodeAnswerOutput(NodeBase):
             else []
         )
         state["image_urls"] = image_urls
-        self._persist_task_result(state)
         # Item-name confirmation already persisted its own assistant response.
         if state.get("answer") and not answer_was_preexisting:
-            self._write_history(state)
+            state["message_id"] = self._write_history(state)
+        self._persist_task_result(state)
 
         add_done_task(state["session_id"], self.name, state.get("is_stream"))
         if state.get("is_stream"):
@@ -116,11 +124,24 @@ class NodeAnswerOutput(NodeBase):
                     "document_id": str(doc.get("document_id") or ""),
                     "document_version": doc.get("document_version"),
                     "page_number": doc.get("page_number"),
+                    "section_title": doc.get("section_title") or doc.get("parent_title") or "",
+                    "content_hash": str(doc.get("content_hash") or ""),
+                    "chunk_index": doc.get("chunk_index"),
+                    "image_refs": NodeAnswerOutput._image_references(doc),
                     "url": doc.get("url") or "",
                     "score": round(float(score), 4) if isinstance(score, (int, float)) else None,
                 }
             )
         return citations
+
+    @staticmethod
+    def _image_references(doc: dict[str, Any]) -> list[str]:
+        references: list[str] = []
+        for value in (doc.get("image_id"), doc.get("image_path"), doc.get("image_url")):
+            if value:
+                references.append(str(value))
+        references.extend(re.findall(r"!\[.*?\]\((.*?)\)", str(doc.get("content") or "")))
+        return list(dict.fromkeys(reference.strip() for reference in references if reference.strip()))
 
     def _construct_prompt(self, state: QueryGraphState) -> str:
         docs = (state.get("reranked_docs") or [])[: settings.citation_max_count]
@@ -188,6 +209,15 @@ class NodeAnswerOutput(NodeBase):
                 parts: list[str] = []
                 for chunk in llm.stream(prompt):
                     delta = str(getattr(chunk, "content", "") or "")
+                    usage = getattr(chunk, "usage_metadata", None) or {}
+                    state["input_tokens"] = max(
+                        state.get("input_tokens", 0),
+                        int(usage.get("input_tokens") or 0),
+                    )
+                    state["output_tokens"] = max(
+                        state.get("output_tokens", 0),
+                        int(usage.get("output_tokens") or 0),
+                    )
                     if delta:
                         parts.append(delta)
                         push_to_session(state["session_id"], SSEEvent.DELTA, {"delta": delta})
@@ -195,15 +225,39 @@ class NodeAnswerOutput(NodeBase):
             else:
                 response = llm.invoke(prompt)
                 state["answer"] = str(response.content or "")
+                usage = getattr(response, "usage_metadata", None) or {}
+                state["input_tokens"] = int(usage.get("input_tokens") or 0)
+                state["output_tokens"] = int(usage.get("output_tokens") or 0)
+            state["total_tokens"] = state.get("input_tokens", 0) + state.get("output_tokens", 0)
+            state["cost"] = round(
+                (
+                    state.get("input_tokens", 0) * settings.model_input_cost_per_1m_tokens
+                    + state.get("output_tokens", 0) * settings.model_output_cost_per_1m_tokens
+                )
+                / 1_000_000,
+                8,
+            )
         except Exception as exc:
             logger.opt(exception=True).error("模型生成失败：{}", exc.__class__.__name__)
             raise RuntimeError("model generation failed") from exc
         finally:
-            state["latency_ms"] = int((time.perf_counter() - started) * 1000)
+            state["model_latency_ms"] = int((time.perf_counter() - started) * 1000)
+            state["latency_ms"] = state["model_latency_ms"]
 
         if not state.get("answer"):
             raise RuntimeError("model returned an empty answer")
         logger.info("模型生成完成，长度={}，耗时={}ms", len(state["answer"]), state["latency_ms"])
+
+    @staticmethod
+    def _enforce_generated_output_security(state: QueryGraphState) -> None:
+        answer = str(state.get("answer") or "")
+        if not SENSITIVE_OUTPUT_PATTERN.search(answer):
+            return
+        state["answer"] = SECURITY_REFUSAL_ANSWER
+        state["has_sufficient_evidence"] = False
+        state["confidence"] = 0.0
+        state["citations"] = []
+        logger.warning("模型输出触发敏感内容防泄漏策略")
 
     @staticmethod
     def _reconcile_generated_evidence(state: QueryGraphState) -> None:
@@ -253,6 +307,12 @@ class NodeAnswerOutput(NodeBase):
         return images
 
     def _persist_task_result(self, state: QueryGraphState) -> None:
+        confidence = float(state.get("confidence") or 0.0)
+        citations = len(state.get("citations") or [])
+        sufficient = bool(state.get("has_sufficient_evidence"))
+        RAG_CONFIDENCE.observe(confidence)
+        RAG_CITATIONS.observe(citations)
+        RAG_EVIDENCE.labels(str(sufficient).lower()).inc()
         for key, value in self._response_payload(state).items():
             set_task_result(state["session_id"], key, value)
 
@@ -267,12 +327,20 @@ class NodeAnswerOutput(NodeBase):
             "has_sufficient_evidence": state.get("has_sufficient_evidence", False),
             "model": state.get("model") or "",
             "latency_ms": state.get("latency_ms", 0),
+            "model_latency_ms": state.get("model_latency_ms", 0),
+            "total_latency_ms": state.get("total_latency_ms", 0),
+            "local_latency_ms": state.get("local_latency_ms", 0),
+            "input_tokens": state.get("input_tokens", 0),
+            "output_tokens": state.get("output_tokens", 0),
+            "total_tokens": state.get("total_tokens", 0),
+            "cost": state.get("cost", 0.0),
+            "message_id": state.get("message_id") or "",
         }
 
     @staticmethod
-    def _write_history(state: QueryGraphState) -> None:
+    def _write_history(state: QueryGraphState) -> str | None:
         try:
-            save_chat_message(
+            return save_chat_message(
                 session_id=state["session_id"],
                 role="assistant",
                 text=state.get("answer") or "",
@@ -287,3 +355,4 @@ class NodeAnswerOutput(NodeBase):
             )
         except Exception as exc:
             logger.warning("对话历史写入失败，不影响本次回答：{}", exc.__class__.__name__)
+            return None

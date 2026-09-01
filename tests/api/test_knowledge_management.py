@@ -1,11 +1,15 @@
 import uuid
+from pathlib import Path
 
 from fastapi.testclient import TestClient
 
 from app.import_process.api.file_import_service import app
 from app.db.models import Tenant, User
-from app.db.repositories import create_knowledge_base
+from app.db.repositories import DEFAULT_KNOWLEDGE_BASE_ID, create_knowledge_base, register_document
+from app.db.repositories import create_import_task
 from app.db.session import session_scope
+import app.services.lifecycle as lifecycle_service
+from app.utils.upload_utils import SavedUpload
 
 
 def test_default_knowledge_base_is_available():
@@ -59,3 +63,41 @@ def test_cross_tenant_knowledge_base_is_not_disclosed():
         response = client.get(f"/knowledge-bases/{record.id}")
 
     assert response.status_code == 404
+
+
+def test_document_delete_api_returns_same_cleanup_job_on_repeat(tmp_path: Path, monkeypatch):
+    token = uuid.uuid4().hex
+    task_id = str(uuid.uuid4())
+    task_dir = tmp_path / "output" / "20260831" / task_id
+    task_dir.mkdir(parents=True)
+    source = task_dir / f"cleanup-{token}.md"
+    source.write_text("# lifecycle", encoding="utf-8")
+    document, _, _ = register_document(
+        DEFAULT_KNOWLEDGE_BASE_ID,
+        SavedUpload(
+            original_filename=source.name,
+            stored_filename=source.name,
+            path=source,
+            content_type="text/markdown",
+            size=source.stat().st_size,
+            sha256=token * 2,
+        ),
+        None,
+    )
+    create_import_task(
+        task_id,
+        document.id,
+        1,
+        local_dir=str(task_dir),
+        local_file_path=str(source),
+    )
+    monkeypatch.setattr(lifecycle_service, "PROJECT_ROOT", tmp_path)
+
+    with TestClient(app) as client:
+        first = client.delete(f"/documents/{document.id}?confirm=true")
+        second = client.delete(f"/documents/{document.id}?confirm=true")
+
+    assert first.status_code == second.status_code == 202
+    assert first.json()["created"] is True
+    assert second.json()["created"] is False
+    assert first.json()["cleanup_job"]["id"] == second.json()["cleanup_job"]["id"]

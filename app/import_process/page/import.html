@@ -379,6 +379,9 @@
             <label>生产环境 API Key
                 <input id="apiKey" type="password" autocomplete="off" placeholder="开发模式可留空">
             </label>
+            <button id="oidcLogin" type="button" hidden>企业登录</button>
+            <button id="oidcLogout" type="button" hidden>退出登录</button>
+            <span id="identityStatus" role="status">身份：开发模式</span>
         </div>
 
         <section class="manager" aria-labelledby="managerTitle">
@@ -423,12 +426,49 @@
         const refreshDocumentsBtn = document.getElementById('refreshDocuments');
         const documentListEl = document.getElementById('documentList');
         const managerStatusEl = document.getElementById('managerStatus');
+        const oidcLoginBtn = document.getElementById('oidcLogin');
+        const oidcLogoutBtn = document.getElementById('oidcLogout');
+        const identityStatusEl = document.getElementById('identityStatus');
         apiKeyEl.value = sessionStorage.getItem('kb_import_api_key') || '';
         const DEFAULT_KB_ID = '00000000-0000-0000-0000-000000000010';
 
         function authHeaders() {
             const key = (apiKeyEl.value || '').trim();
             return key ? {'X-API-Key': key} : {};
+        }
+
+        function submitLogout() {
+            const form = document.createElement('form');
+            form.method = 'POST';
+            form.action = `${API_BASE}/auth/logout`;
+            document.body.appendChild(form);
+            form.submit();
+        }
+
+        async function updateIdentity() {
+            try {
+                const configResponse = await fetch(`${API_BASE}/auth/config`);
+                const config = configResponse.ok ? await configResponse.json() : {enabled: false};
+                if (!config.enabled) {
+                    identityStatusEl.textContent = '身份：开发模式';
+                    oidcLoginBtn.hidden = true;
+                    oidcLogoutBtn.hidden = true;
+                    return;
+                }
+                const meResponse = await fetch(`${API_BASE}/auth/me`);
+                if (meResponse.ok) {
+                    const me = await meResponse.json();
+                    identityStatusEl.textContent = `身份：${me.role}`;
+                    oidcLoginBtn.hidden = true;
+                    oidcLogoutBtn.hidden = false;
+                } else {
+                    identityStatusEl.textContent = '身份：未登录';
+                    oidcLoginBtn.hidden = false;
+                    oidcLogoutBtn.hidden = true;
+                }
+            } catch (_error) {
+                identityStatusEl.textContent = '身份：状态未知';
+            }
         }
 
         async function loadKnowledgeBases() {
@@ -581,6 +621,12 @@
         // 初始化
         function init() {
             loadKnowledgeBases();
+            updateIdentity();
+            oidcLoginBtn.addEventListener('click', () => {
+                const returnTo = `${location.pathname}${location.search}`;
+                location.assign(`${API_BASE}/auth/login?return_to=${encodeURIComponent(returnTo)}`);
+            });
+            oidcLogoutBtn.addEventListener('click', submitLogout);
             apiKeyEl.addEventListener('change', () => {
                 sessionStorage.setItem('kb_import_api_key', (apiKeyEl.value || '').trim());
                 loadKnowledgeBases();
@@ -654,23 +700,42 @@
             // 文件大小格式化（KB，保留2位小数）
             const fileSize = (file.size / 1024).toFixed(2) + ' KB';
 
-            // 文件项HTML结构
-            fileItem.innerHTML = `
-                <div class="file-header">
-                    <div class="file-name"></div>
-                    <div class="file-size"></div>
-                    <div class="status-badge status-uploading">上传中...</div>
-                </div>
-                <div class="progress-container">
-                    <div class="progress-bar" style="width: 0%"></div>
-                </div>
-                <button class="logs-toggle">📜 查看系统日志</button>
-                <button class="task-action cancel" hidden>取消任务</button>
-                <button class="task-action retry" hidden>重试任务</button>
-                <div class="logs-container"></div>
-            `;
-            fileItem.querySelector('.file-name').textContent = file.name;
-            fileItem.querySelector('.file-size').textContent = `大小: ${fileSize}`;
+            // 全部使用 DOM API，避免把文件名等不可信内容交给 HTML 解析器。
+            const header = document.createElement('div');
+            header.className = 'file-header';
+            const fileNameEl = document.createElement('div');
+            fileNameEl.className = 'file-name';
+            fileNameEl.textContent = file.name;
+            const fileSizeEl = document.createElement('div');
+            fileSizeEl.className = 'file-size';
+            fileSizeEl.textContent = `大小: ${fileSize}`;
+            const status = document.createElement('div');
+            status.className = 'status-badge status-uploading';
+            status.textContent = '上传中...';
+            header.append(fileNameEl, fileSizeEl, status);
+            const progressContainer = document.createElement('div');
+            progressContainer.className = 'progress-container';
+            const progress = document.createElement('div');
+            progress.className = 'progress-bar';
+            progress.style.width = '0%';
+            progressContainer.appendChild(progress);
+            const logsButton = document.createElement('button');
+            logsButton.className = 'logs-toggle';
+            logsButton.type = 'button';
+            logsButton.textContent = '📜 查看系统日志';
+            const cancelButton = document.createElement('button');
+            cancelButton.className = 'task-action cancel';
+            cancelButton.type = 'button';
+            cancelButton.hidden = true;
+            cancelButton.textContent = '取消任务';
+            const retryButton = document.createElement('button');
+            retryButton.className = 'task-action retry';
+            retryButton.type = 'button';
+            retryButton.hidden = true;
+            retryButton.textContent = '重试任务';
+            const logs = document.createElement('div');
+            logs.className = 'logs-container';
+            fileItem.append(header, progressContainer, logsButton, cancelButton, retryButton, logs);
 
             // 添加到文件列表
             fileList.appendChild(fileItem);

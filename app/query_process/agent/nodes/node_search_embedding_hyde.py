@@ -1,8 +1,10 @@
+import time
+
 from app.clients.milvus_utils import create_hybrid_search_requests, get_milvus_client, hybrid_search
 from app.conf.milvus_config import milvus_config
 from app.core.load_prompt import load_prompt
 from app.core.settings import settings
-from app.core.metrics import RETRIEVAL_RESULTS
+from app.core.metrics import MILVUS_RETRIEVAL_LATENCY, RETRIEVAL_RESULTS
 from app.lm.embedding_utils import generate_embeddings
 from app.lm.lm_utils import get_llm_client
 from app.query_process.agent.node_base import NodeBase
@@ -57,6 +59,7 @@ class NodeSearchEmbeddingHyde(NodeBase):
                 rewritten_query=rewritten_query,
                 hyde_doc=hyde_doc,
                 item_names=item_names,
+                tenant_id=state.get("tenant_id"),
                 knowledge_base_id=state.get("knowledge_base_id"),
                 top_k=settings.retrieval_top_k,
             )
@@ -106,6 +109,7 @@ class NodeSearchEmbeddingHyde(NodeBase):
             rewritten_query: str,
             hyde_doc: str,
             item_names=None,
+            tenant_id: str | None = None,
             knowledge_base_id: str | None = None,
             req_limit: int | None = None,
             top_k: int = 5,
@@ -149,8 +153,8 @@ class NodeSearchEmbeddingHyde(NodeBase):
             # 4、构建安全的商品/知识库过滤表达式。
             expr = build_chunk_filter(
                 item_names,
+                tenant_id,
                 knowledge_base_id,
-                enforce_knowledge_base=True,
             )
             logger.info(
                 "HyDE 检索过滤已构建，商品数量={}，知识库隔离={}",
@@ -169,15 +173,25 @@ class NodeSearchEmbeddingHyde(NodeBase):
             # 6、执行混合向量检索
             logger.info("步骤2: 开始执行 Milvus 混合检索...")
             client = get_milvus_client()
-            res = hybrid_search(
-                client=client,
-                collection_name=collection_name,
-                reqs=reqs,
-                ranker_weights=ranker_weights,
-                norm_score=norm_score,
-                limit=top_k,
-                output_fields=list(output_fields or CHUNK_OUTPUT_FIELDS),
-            )
+            started = time.perf_counter()
+            status = "success"
+            try:
+                res = hybrid_search(
+                    client=client,
+                    collection_name=collection_name,
+                    reqs=reqs,
+                    ranker_weights=ranker_weights,
+                    norm_score=norm_score,
+                    limit=top_k,
+                    output_fields=list(output_fields or CHUNK_OUTPUT_FIELDS),
+                )
+            except Exception:
+                status = "error"
+                raise
+            finally:
+                MILVUS_RETRIEVAL_LATENCY.labels("hyde", status).observe(
+                    time.perf_counter() - started
+                )
             RETRIEVAL_RESULTS.labels("hyde").observe(len(res[0]) if res else 0)
 
             return res

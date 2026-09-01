@@ -12,7 +12,7 @@ from app.conf.milvus_config import milvus_config
 from app.core.logger import logger
 from app.import_process.agent.node_base import NodeBase
 from app.import_process.agent.state import ImportGraphState
-from app.utils.milvus_utils import escape_milvus_string
+from app.utils.milvus_utils import build_scope_filter
 
 
 class NodeImportMilvus(NodeBase):
@@ -118,6 +118,9 @@ class NodeImportMilvus(NodeBase):
             client - MilvusClient实例
             chunks_json_data: List[Dict[str, Any]] - 待入库的切片列表
         """
+        first_chunk = chunks_json_data[0]
+        tenant_id = str(first_chunk.get("tenant_id") or "")
+        knowledge_base_id = str(first_chunk.get("knowledge_base_id") or "")
         document_ids = sorted(
             {
                 str(chunk.get("document_id", "")).strip()
@@ -127,10 +130,14 @@ class NodeImportMilvus(NodeBase):
         )
         if document_ids:
             for document_id in document_ids:
-                safe_document_id = escape_milvus_string(document_id)
                 client.delete(
                     collection_name=milvus_config.chunks_collection,
-                    filter=f'document_id == "{safe_document_id}"',
+                    filter=build_scope_filter(
+                        tenant_id,
+                        knowledge_base_id,
+                        document_id=document_id,
+                        active_only=False,
+                    ),
                 )
                 logger.info("已按 document_id={} 清理旧版本切片", document_id)
             return
@@ -152,9 +159,20 @@ class NodeImportMilvus(NodeBase):
 
         # 清理同item_name旧数据
         for item_name in item_names:
-            self._clear_chunks_by_item_name(client, item_name)
+            self._clear_chunks_by_item_name(
+                client,
+                item_name,
+                tenant_id,
+                knowledge_base_id,
+            )
 
-    def _clear_chunks_by_item_name(self, client, item_name: str):
+    def _clear_chunks_by_item_name(
+        self,
+        client,
+        item_name: str,
+        tenant_id: str,
+        knowledge_base_id: str,
+    ):
         """
         内部核心函数：根据item_name删除Milvus中的旧切片数据
         参数：
@@ -165,8 +183,12 @@ class NodeImportMilvus(NodeBase):
         """
 
         try:
-            safe_item_name = escape_milvus_string(item_name)
-            filter_expr = f'item_name=="{safe_item_name}"'
+            filter_expr = build_scope_filter(
+                tenant_id,
+                knowledge_base_id,
+                item_name=item_name,
+                active_only=False,
+            )
             client.delete(collection_name=milvus_config.chunks_collection, filter=filter_expr)
 
             logger.info(f"已清理设备名称为{item_name}的旧切片数据")
@@ -232,6 +254,17 @@ class NodeImportMilvus(NodeBase):
 
         # 2. 新增字段：业务字段+主键+双向量字段，字段类型/长度适配业务场景
         schema.add_field(field_name="chunk_id", datatype=DataType.INT64, is_primary=True, auto_id=True)
+        schema.add_field(
+            field_name="tenant_id",
+            datatype=DataType.VARCHAR,
+            max_length=64,
+            is_partition_key=True,
+        )
+        schema.add_field(field_name="knowledge_base_id", datatype=DataType.VARCHAR, max_length=64)
+        schema.add_field(field_name="document_id", datatype=DataType.VARCHAR, max_length=64)
+        schema.add_field(field_name="document_version", datatype=DataType.INT64)
+        schema.add_field(field_name="task_id", datatype=DataType.VARCHAR, max_length=64)
+        schema.add_field(field_name="is_active", datatype=DataType.BOOL)
         schema.add_field(field_name="content", datatype=DataType.VARCHAR, max_length=65535)  # 切片内容
         schema.add_field(field_name="title", datatype=DataType.VARCHAR, max_length=65535)  # 切片标题
         schema.add_field(field_name="parent_title", datatype=DataType.VARCHAR, max_length=65535)  # 父标题
@@ -293,6 +326,36 @@ class NodeImportMilvus(NodeBase):
         # 校验3：切片包含 sparse_vector 字段
         if 'sparse_vector' not in first_chunk:
             raise ValueError("错误: 数据中缺失sparse_vector字段")
+
+        required_fields = (
+            "tenant_id",
+            "knowledge_base_id",
+            "document_id",
+            "document_version",
+            "task_id",
+            "is_active",
+        )
+        expected_scope = (
+            str(first_chunk.get("tenant_id") or ""),
+            str(first_chunk.get("knowledge_base_id") or ""),
+            str(first_chunk.get("document_id") or ""),
+            int(first_chunk.get("document_version") or 0),
+            str(first_chunk.get("task_id") or ""),
+        )
+        if not all(expected_scope) or first_chunk.get("is_active") is not True:
+            raise ValueError("Milvus切片缺少强制租户、知识库、文档、版本、任务或活跃状态")
+        for chunk in chunks:
+            if any(field not in chunk for field in required_fields):
+                raise ValueError("Milvus切片缺少强制隔离元数据")
+            scope = (
+                str(chunk.get("tenant_id") or ""),
+                str(chunk.get("knowledge_base_id") or ""),
+                str(chunk.get("document_id") or ""),
+                int(chunk.get("document_version") or 0),
+                str(chunk.get("task_id") or ""),
+            )
+            if scope != expected_scope or chunk.get("is_active") is not True:
+                raise ValueError("单次Milvus写入包含不一致的租户范围")
 
         # 提取向量维度和商品名称，用于后续集合创建/日志展示
         vector_dimension = len(first_chunk['dense_vector'])

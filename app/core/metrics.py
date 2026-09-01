@@ -1,6 +1,6 @@
 """Prometheus metrics shared by workflows and workers."""
 
-from prometheus_client import Counter, Histogram
+from prometheus_client import Counter, Gauge, Histogram
 
 
 WORKFLOW_NODE_RUNS = Counter(
@@ -23,4 +23,78 @@ RETRIEVAL_RESULTS = Histogram(
     "Number of documents returned by a retrieval path",
     ("path",),
     buckets=(0, 1, 2, 3, 5, 10, 20, 50),
+)
+MILVUS_RETRIEVAL_LATENCY = Histogram(
+    "kb_milvus_retrieval_duration_seconds",
+    "Milvus retrieval latency",
+    ("path", "status"),
+)
+WORKER_QUEUE_LENGTH = Gauge(
+    "kb_worker_queue_length",
+    "Pending Celery messages by queue",
+    ("queue",),
+)
+CLEANUP_EVENTS = Counter(
+    "kb_cleanup_events_total",
+    "Document cleanup stage outcomes",
+    ("status", "stage"),
+)
+AUDIT_EVENTS = Counter(
+    "kb_audit_events_total",
+    "Persisted enterprise audit events",
+    ("event_type", "outcome"),
+)
+AUTH_EVENTS = Counter(
+    "kb_authentication_events_total",
+    "Authentication outcomes without credential contents",
+    ("method", "outcome", "reason"),
+)
+RAG_CONFIDENCE = Histogram(
+    "kb_rag_answer_confidence",
+    "Grounded answer confidence",
+    buckets=(0, 0.1, 0.2, 0.4, 0.6, 0.8, 0.9, 0.95, 1.0),
+)
+RAG_CITATIONS = Histogram(
+    "kb_rag_citation_count",
+    "Citations returned per answer",
+    buckets=(0, 1, 2, 3, 5, 8, 10, 20),
+)
+RAG_EVIDENCE = Counter(
+    "kb_rag_evidence_total",
+    "Answers with or without sufficient evidence",
+    ("sufficient",),
+)
+EMBEDDING_CALLS = Counter(
+    "kb_embedding_calls_total",
+    "Embedding batches and their outcome",
+    ("status",),
+)
+EMBEDDING_LATENCY = Histogram(
+    "kb_embedding_duration_seconds",
+    "Embedding batch latency",
+)
+EMBEDDING_ITEMS = Counter(
+    "kb_embedding_items_total",
+    "Texts submitted for embedding",
+)
+QUERY_END_TO_END_LATENCY = Histogram(
+    "kb_query_end_to_end_duration_seconds",
+    "Complete LangGraph query latency including model time",
+    ("status",),
+)
+DATABASE_POOL_SIZE = Gauge(
+    "kb_database_pool_size",
+    "Configured SQLAlchemy database connection pool size",
+)
+DATABASE_POOL_CHECKED_OUT = Gauge(
+    "kb_database_pool_checked_out",
+    "SQLAlchemy database connections currently checked out",
+)
+DATABASE_POOL_OVERFLOW = Gauge(
+    "kb_database_pool_overflow",
+    "SQLAlchemy database pool overflow connections",
+)
+DATABASE_POOL_TIMEOUTS = Counter(
+    "kb_database_pool_timeouts_total",
+    "Database connection pool checkout timeouts",
 )

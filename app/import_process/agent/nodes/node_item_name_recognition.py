@@ -14,7 +14,7 @@ from app.import_process.agent.node_base import NodeBase
 from app.import_process.agent.state import ImportGraphState, create_default_state
 from app.lm.embedding_utils import generate_embeddings
 from app.lm.lm_utils import get_llm_client
-from app.utils.milvus_utils import escape_milvus_string
+from app.utils.milvus_utils import build_scope_filter
 
 # --- 配置参数 (Configuration) # --- 配置参数 (Configuration) ---
 # 大模型识别商品名称的上下文切片数：取前5个切片，避免上下文过长导致大模型输入超限
@@ -129,6 +129,21 @@ class NodeItemNameRecognition(NodeBase):
                     is_primary=True,
                     auto_id=True
                 )
+                schema.add_field(
+                    field_name="tenant_id",
+                    datatype=DataType.VARCHAR,
+                    max_length=64,
+                    is_partition_key=True,
+                )
+                schema.add_field(
+                    field_name="knowledge_base_id",
+                    datatype=DataType.VARCHAR,
+                    max_length=64,
+                )
+                schema.add_field(field_name="document_id", datatype=DataType.VARCHAR, max_length=64)
+                schema.add_field(field_name="document_version", datatype=DataType.INT64)
+                schema.add_field(field_name="task_id", datatype=DataType.VARCHAR, max_length=64)
+                schema.add_field(field_name="is_active", datatype=DataType.BOOL)
 
                 # 添加文件标题字段：VARCHAR类型，最大长度65535，适配长标题
                 schema.add_field(
@@ -223,13 +238,14 @@ class NodeItemNameRecognition(NodeBase):
 
             # 5、幂等性处理：删除同名商品数据，避免重复存储
             # 商品名称转义，防止特殊字符导致过滤表达式解析失败
-            safe_item_name = escape_milvus_string(value=item_name)
+            tenant_id = str(state.get("tenant_id") or "")
             knowledge_base_id = str(state.get("knowledge_base_id") or "")
-            filter_expr = f'item_name=="{safe_item_name}"'
-            if knowledge_base_id:
-                filter_expr += (
-                    f' and knowledge_base_id=="{escape_milvus_string(knowledge_base_id)}"'
-                )
+            filter_expr = build_scope_filter(
+                tenant_id,
+                knowledge_base_id,
+                item_name=item_name,
+                active_only=False,
+            )
             client.delete(collection_name=collection_name, filter=filter_expr)
             logger.info(f"Milvus幂等性处理完成，删除集合中的历史数据: {item_name}")
 
@@ -237,9 +253,11 @@ class NodeItemNameRecognition(NodeBase):
             data = {
                 "file_title": file_title,
                 "item_name": item_name,
-                "tenant_id": str(state.get("tenant_id") or ""),
+                "tenant_id": tenant_id,
                 "knowledge_base_id": knowledge_base_id,
                 "document_id": str(state.get("document_id") or ""),
+                "document_version": int(state.get("document_version") or 1),
+                "task_id": str(state.get("task_id") or ""),
                 "is_active": True,
                 "dense_vector": dense_vector,
                 "sparse_vector": sparse_vector

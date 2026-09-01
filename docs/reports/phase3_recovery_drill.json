@@ -1,0 +1,24 @@
+{
+  "drill": "sanitized-sqlite-backup-restore",
+  "executed_at": "2026-08-31T18:07:51.321419+00:00",
+  "source_is_business_data": false,
+  "tenant_count": 1,
+  "document_count": 2,
+  "entity_counts": {
+    "users": 1,
+    "memberships": 1,
+    "knowledge_bases": 1,
+    "document_versions": 2,
+    "sessions": 1,
+    "messages": 2,
+    "citations": 1,
+    "images": 1,
+    "vector_manifest": 2
+  },
+  "vector_manifest_chunk_count": 7,
+  "row_digest": "004a3c17a1f2eecd48222bb783b1733655a5e53d1b5d8225092c175120f7df18",
+  "foreign_key_error_count": 0,
+  "integrity_check": "ok",
+  "elapsed_seconds": 0.2168,
+  "passed": true
+}

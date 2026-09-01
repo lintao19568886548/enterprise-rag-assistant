@@ -1,0 +1,12 @@
+{
+  "drill": "sanitized-sqlite-backup-restore",
+  "executed_at": "2026-08-31T15:34:16.695060+00:00",
+  "source_is_business_data": false,
+  "tenant_count": 1,
+  "document_count": 2,
+  "row_digest": "630775eba0e1a8ffd82070c23e022a0bd4e6782d8a5e034731ce96445c415b9a",
+  "foreign_key_error_count": 0,
+  "integrity_check": "ok",
+  "elapsed_seconds": 0.0421,
+  "passed": true
+}

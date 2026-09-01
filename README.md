@@ -9,6 +9,7 @@
 ```text
 Browser
   ├─ http://127.0.0.1:8000/import.html
+  ├─ http://127.0.0.1:8000/admin.html
   └─ http://127.0.0.1:8001/chat.html
           │
      FastAPI services
@@ -131,9 +132,13 @@ REDIS_ENABLED=True
 服务页面：
 
 - 文件导入：http://127.0.0.1:8000/import.html
+- 企业管理工作台：http://127.0.0.1:8000/admin.html
 - 问答：http://127.0.0.1:8001/chat.html
 - 导入 Swagger：http://127.0.0.1:8000/docs
 - 问答 Swagger：http://127.0.0.1:8001/docs
+
+二期本机真实验收、质量门禁、已知外部阻塞和回退入口见
+[`docs/PHASE2_ACCEPTANCE.md`](docs/PHASE2_ACCEPTANCE.md)。
 
 ## PyCharm 启动
 
@@ -285,7 +290,17 @@ Compose 部署完成后，PostgreSQL 使用 `pg_dump`/`pg_restore`，MinIO 使�
 - 知识库、文档、版本、任务、重建、重试、取消和幂等导入接口。
 - 稠密/稀疏双路检索、HyDE、RRF、重排、知识库过滤、拒答、结构化引用、页码、图片、置信度和模型延迟。
 - DashScope/OpenAI 兼容模型网关的超时、重试、回退与熔断。
-- 30 条版本化 RAG 评测种子、pytest、Ruff、mypy、pre-commit 和 CI。
+- 100 条版本化 RAG 评测集（30 条已批准、70 条待业务专家标注）、pytest、Ruff、mypy、pre-commit 和 CI。
+
+## 三期准生产文档
+
+- `docs/PHASE3_ACCEPTANCE.md`：本机真实验收、未验证项和发布阻塞项。
+- `docs/PRODUCTION_READINESS.md`：准生产判定、staging 启停和发布流程。
+- `docs/RELEASE_CHECKLIST.md`：发布前 fail-closed 检查清单。
+- `docs/ROLLBACK_CHECKLIST.md`：数据保全优先的回滚清单。
+- `docs/OIDC_OPERATIONS.md` 和 `docs/POSTGRES_RLS_ACCEPTANCE.md`：身份与数据库隔离运维。
+- `docs/RAG_EVALUATION.md` 和 `docs/PERFORMANCE_BASELINE.md`：评测与性能证据边界。
+- `docs/OBSERVABILITY.md`、`docs/INCIDENT_RUNBOOK.md`、`docs/DISASTER_RECOVERY.md`：监控、值班和恢复。
 
 ## 生产上线前检查
 
