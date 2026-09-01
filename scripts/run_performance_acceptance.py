@@ -13,6 +13,7 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 
@@ -29,7 +30,7 @@ def _percentile(values: list[float], percentile: float) -> float:
     return round(ordered[index], 2)
 
 
-def _summary(latencies: list[float], statuses: list[int]) -> dict[str, object]:
+def _summary(latencies: list[float], statuses: list[int]) -> dict[str, Any]:
     successes = sum(1 for status in statuses if 200 <= status < 300)
     return {
         "requests": len(statuses),
@@ -42,7 +43,7 @@ def _summary(latencies: list[float], statuses: list[int]) -> dict[str, object]:
     }
 
 
-def run(report_path: Path) -> dict[str, object]:
+def run(report_path: Path) -> dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix="enterprise-rag-performance-") as raw_dir:
         temp_dir = Path(raw_dir)
         os.environ.update(
@@ -131,7 +132,7 @@ def run(report_path: Path) -> dict[str, object]:
         tracemalloc.stop()
         query_statuses, query_latencies = map(list, zip(*query_results, strict=True))
         upload_statuses, upload_latencies = map(list, zip(*upload_results, strict=True))
-        report: dict[str, object] = {
+        report: dict[str, Any] = {
             "executed_at": datetime.now(UTC).isoformat(),
             "mode": "in_process_api_and_database_with_mocked_external_model_and_parser",
             "uses_business_data": False,
